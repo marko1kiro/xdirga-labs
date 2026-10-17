@@ -2181,7 +2181,7 @@ export class AppRuntimeService {
       type: "server",
       level: "info",
       message,
-      sourceName: "Dyad",
+      sourceName: "XDIRGA LABS",
       appId: options.appId,
       timestamp,
       runtimeBoundary: options.operation,

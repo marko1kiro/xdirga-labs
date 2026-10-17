@@ -22,7 +22,7 @@ const DYAD_FALLBACK_EMAIL = "git@dyad.sh";
 export async function getGitAuthor(): Promise<GitAuthor> {
   const githubEmail = (await getGithubUser())?.email;
   return {
-    name: "Dyad",
+    name: "XDIRGA LABS",
     email: githubEmail || gitLabUserEmail() || DYAD_FALLBACK_EMAIL,
   };
 }

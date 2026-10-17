@@ -645,7 +645,7 @@ export const CLOUD_PROVIDERS: Record<
     gatewayPrefix: "openrouter/",
   },
   auto: {
-    displayName: "Dyad",
+    displayName: "XDIRGA LABS",
     websiteUrl: "https://academy.dyad.sh/subscription",
     gatewayPrefix: "dyad/",
   },

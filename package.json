@@ -1,16 +1,16 @@
 {
-  "name": "dyad",
+  "name": "xdirga-labs",
   "version": "1.20.0-beta.1",
-  "description": "Free, local, open-source AI app builder",
+  "description": "XDIRGA LABS \u2014 local AI app builder",
   "keywords": [],
   "license": "MIT",
   "author": {
-    "name": "Will Chen",
-    "email": "willchen90@gmail.com"
+    "name": "XDIRGA LABS",
+    "email": ""
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/dyad-sh/dyad.git"
+    "url": "https://github.com/marko1kiro/dyad-pro.git"
   },
   "main": ".vite/build/main_bootstrap.js",
   "scripts": {
@@ -220,5 +220,5 @@
   "engines": {
     "node": ">=24 <26"
   },
-  "productName": "dyad"
+  "productName": "XDIRGA LABS"
 }

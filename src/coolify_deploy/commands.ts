@@ -222,7 +222,7 @@ async function ensureGithubDeployKey({
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        title: "Dyad deploy key (Coolify)",
+        title: "XDIRGA LABS deploy key (Coolify)",
         key: publicKey,
         read_only: true,
       }),
@@ -369,7 +369,7 @@ async function ensureGitLabDeployKey({
   let registered: GitLabDeployKey | undefined;
   try {
     registered = await client.addDeployKey(remote.projectId, {
-      title: "Dyad deploy key (Coolify)",
+      title: "XDIRGA LABS deploy key (Coolify)",
       key: publicKey,
     });
   } catch (error) {

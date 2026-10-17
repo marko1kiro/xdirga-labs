@@ -98,7 +98,7 @@ export const TitleBar = () => {
         <div className="flex items-center shrink-0">
           <div className={`${showWindowControls ? "pl-2" : "pl-18"}`}></div>
 
-          <img src={logo} alt="Dyad" className="ml-2 w-5 h-5 shrink-0" />
+          <img src={logo} alt="XDIRGA LABS" className="ml-2 w-5 h-5 shrink-0" />
 
           <Tooltip>
             <TooltipTrigger

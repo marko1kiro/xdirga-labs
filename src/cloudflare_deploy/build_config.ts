@@ -40,7 +40,7 @@ export function buildCloudflareTokenTemplateUrl(): string {
   );
   url.searchParams.set("accountId", "*");
   url.searchParams.set("zoneId", "all");
-  url.searchParams.set("name", "Dyad");
+  url.searchParams.set("name", "XDIRGA LABS");
   return url.toString();
 }
 

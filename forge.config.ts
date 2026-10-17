@@ -189,7 +189,7 @@ const config: ForgeConfig = {
     ],
     protocols: [
       {
-        name: "Dyad",
+        name: "XDIRGA LABS",
         schemes: ["dyad"],
       },
     ],
@@ -266,8 +266,8 @@ const config: ForgeConfig = {
       name: "@electron-forge/publisher-github",
       config: {
         repository: {
-          owner: "dyad-sh",
-          name: "dyad",
+          owner: "marko1kiro",
+          name: "dyad-pro",
         },
         draft: true,
         force: true,
