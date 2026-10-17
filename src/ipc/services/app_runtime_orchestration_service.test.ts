@@ -489,7 +489,7 @@ describe("AppRuntimeService", () => {
       type: "server",
       level: "info",
       message: "Rebuilding app",
-      sourceName: "Dyad",
+      sourceName: "XDIRGA LABS",
       appId: APP_ID,
       timestamp: 123,
       runtimeBoundary: "rebuild",

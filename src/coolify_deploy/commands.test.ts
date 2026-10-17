@@ -2095,7 +2095,7 @@ describe("deploying from GitLab", () => {
       "https://gitlab.example.com/api/v4/projects/9/deploy_keys",
     );
     expect(keyCall?.body).toEqual({
-      title: "Dyad deploy key (Coolify)",
+      title: "XDIRGA LABS deploy key (Coolify)",
       key: "ssh-ed25519 AAAAPUBLIC comment",
       can_push: false,
     });
