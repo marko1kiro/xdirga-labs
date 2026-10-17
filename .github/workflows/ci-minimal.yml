@@ -72,12 +72,14 @@ jobs:
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
-      # Shard 4 OOMed at 4GB after only 35 files with 4 parallel workers
-      # (parallel workers multiply peak memory). Run it sequentially so
-      # peak memory is one worker, not four.
+      # Shard 4 OOMed at 4GB after only 21 files even sequentially
+      # (maxWorkers=1), so a single file in this shard leaks to 4GB by
+      # itself. Run it in forks pool: each file gets its own process, so
+      # a leaking file kills only its fork and Vitest reports which file
+      # it was, instead of crashing the whole shard.
       - name: Unit tests (shard 4/4)
         if: always()
-        run: npx vitest run --shard=4/4 --maxWorkers=1
+        run: npx vitest run --shard=4/4 --pool=forks --maxWorkers=1
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
