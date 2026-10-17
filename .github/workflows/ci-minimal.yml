@@ -13,8 +13,7 @@ concurrency:
 jobs:
   check:
     name: Typecheck + Lint + Test
-    # Upstream never ran unit tests on Ubuntu: Vitest tinypool crashes on
-    # ubuntu-latest with Channel closed after all tests pass. macOS matches upstream.
+    # macOS matches upstream (unit tests run on macOS + Windows upstream).
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -27,12 +26,19 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+        env:
+          # Required for @vscode/ripgrep postinstall to download its binary
+          # without hitting GitHub API rate limits (unauthenticated = 60/hr
+          # per shared runner IP -> 403). Same as upstream ci.yml.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Must run before type-checking and unit tests: the vitest harness
       # imports the fake-llm-server in-process, so its own node_modules
       # (express 4 + @types) must be installed for both tsc and vitest
       # to resolve the right packages.
       - name: Prep test server
         run: cd testing/fake-llm-server && npm install && npm run build && cd -
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Typecheck
         run: npm run ts
       - name: Lint
