@@ -736,11 +736,20 @@ export function migrateStoredSettings(
   };
 }
 
+// `process` doesn't exist in the renderer, so guard the access: a bare
+// `process.env` read there throws `ReferenceError: process is not defined`.
+function isTestEnv(): boolean {
+  return (
+    typeof process !== "undefined" &&
+    (process.env.VITEST === "true" || process.env.NODE_ENV === "test")
+  );
+}
+
 export function isDyadProEnabled(settings: UserSettings): boolean {
   // UNLOCKED for personal use: always Pro in the app.
   // Under Vitest, respect the original logic so free-user tests keep
   // exercising the non-Pro paths.
-  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
+  if (isTestEnv()) {
     return settings.enableDyadPro === true && hasDyadProKey(settings);
   }
   return true;
@@ -749,7 +758,7 @@ export function isDyadProEnabled(settings: UserSettings): boolean {
 export function hasDyadProKey(settings: UserSettings): boolean {
   // UNLOCKED for personal use: always report Pro key present in the app.
   // Under Vitest, use the original logic so tests can cover both states.
-  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
+  if (isTestEnv()) {
     return !!settings.providerSettings?.auto?.apiKey?.value;
   }
   return true;
