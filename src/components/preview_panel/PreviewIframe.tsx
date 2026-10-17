@@ -390,11 +390,11 @@ export const PreviewIframe = ({
           ? cloudSandboxStatus.lastErrorMessage.includes("Dyad stopped")
             ? cloudSandboxStatus.lastErrorMessage
             : cloudSandboxStatus.terminationReason === "credits_exhausted"
-              ? "This cloud sandbox was stopped because your Dyad Pro credits ran out. Add credits and start it again."
-              : "This cloud sandbox was stopped because Dyad could not confirm billing. Please try starting it again."
+              ? "This cloud sandbox was stopped because your XDIRGA LABS Pro credits ran out. Add credits and start it again."
+              : "This cloud sandbox was stopped because XDIRGA LABS could not confirm billing. Please try starting it again."
           : cloudSandboxStatus.terminationReason === "credits_exhausted"
-            ? "This cloud sandbox was stopped because your Dyad Pro credits ran out. Add credits and start it again."
-            : "This cloud sandbox was stopped because Dyad could not confirm billing. Please try starting it again.",
+            ? "This cloud sandbox was stopped because your XDIRGA LABS Pro credits ran out. Add credits and start it again."
+            : "This cloud sandbox was stopped because XDIRGA LABS could not confirm billing. Please try starting it again.",
         source: "dyad-app",
       });
     }
@@ -1735,7 +1735,7 @@ function RecordingSetupOverlay({
         </p>
         <p className="text-sm text-muted-foreground">
           {recorder.phase === "starting" || recorder.phase === "authenticating"
-            ? "Dyad is preparing an isolated environment for your recording — hold off on interacting with the preview until it's ready."
+            ? "XDIRGA LABS is preparing an isolated environment for your recording — hold off on interacting with the preview until it's ready."
             : "Hold off on interacting with the preview until this finishes."}
         </p>
       </div>

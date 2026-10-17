@@ -116,7 +116,7 @@ export function SubscriptionConnectionStatus() {
           <div className="mx-auto mb-3 rounded-full bg-primary/10 p-4 text-primary">
             <Sparkles className="size-8" />
           </div>
-          <DialogTitle>Enjoy your extra Dyad usage!</DialogTitle>
+          <DialogTitle>Enjoy your extra XDIRGA LABS usage!</DialogTitle>
           <DialogDescription>
             Your ChatGPT subscription is connected.
           </DialogDescription>
@@ -132,8 +132,8 @@ export function SubscriptionConnectionStatus() {
           {(!settings || hasPro) && (
             <p>
               {!settings
-                ? "Checking Dyad Pro status…"
-                : "Uses up to 1.5 Dyad Pro credits / 1 million tokens processed."}
+                ? "Checking XDIRGA LABS Pro status…"
+                : "Uses up to 1.5 XDIRGA LABS Pro credits / 1 million tokens processed."}
             </p>
           )}
         </div>

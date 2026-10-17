@@ -291,8 +291,8 @@ function NitroConversionOffer({
   return (
     <div className="mt-3 space-y-2" data-testid="cloudflare-nitro-offer">
       <p>
-        This is a Vite app, so Dyad can convert it into a Nitro app to deploy it
-        to Cloudflare; the app will keep working as it does now.
+        This is a Vite app, so XDIRGA LABS can convert it into a Nitro app to
+        deploy it to Cloudflare; the app will keep working as it does now.
       </p>
       <div className="flex items-center gap-2">
         <RecheckButton onCheck={onRecheck} />
@@ -383,8 +383,8 @@ function ConnectedAccount({ appId }: { appId: number }) {
       <div className={noticeClass} data-testid="cloudflare-no-targets">
         <p className="font-medium mb-1">No Cloudflare Worker found</p>
         <p>
-          Dyad deploys Nitro apps and folders that contain a Wrangler config
-          (wrangler.jsonc, wrangler.json or wrangler.toml).
+          XDIRGA LABS deploys Nitro apps and folders that contain a Wrangler
+          config (wrangler.jsonc, wrangler.json or wrangler.toml).
           {!status.data.canConvertToNitro &&
             " Add one to this app, then sync it to GitHub and click Refresh."}
         </p>
@@ -429,8 +429,8 @@ function ConnectedAccount({ appId }: { appId: number }) {
       <p className="text-sm text-gray-600 dark:text-gray-400">
         {folders.length > 1 &&
           "Each folder here deploys to its own Worker, and each connected one deploys when a sync pushes changes to it. "}
-        Dyad finds deployable Cloudflare apps on its own, but you can click
-        Refresh to pick up recent changes.
+        XDIRGA LABS finds deployable Cloudflare apps on its own, but you can
+        click Refresh to pick up recent changes.
       </p>
       {folders.length > 1 && (
         <TargetList
@@ -461,7 +461,7 @@ function ConnectedAccount({ appId }: { appId: number }) {
               className={warningClass}
               data-testid="cloudflare-config-missing"
             >
-              Dyad cannot find a Wrangler config or a Nitro app in{" "}
+              XDIRGA LABS cannot find a Wrangler config or a Nitro app in{" "}
               {folder.label} on {status.data.branch}. If it is gone, Cloudflare
               cannot build it either, but its deploy rule is still there:
               restore it, or disconnect {folder.label} to remove the rule.
@@ -945,8 +945,8 @@ function WorkerForm({
 
       {app?.neonProjectId && (
         <div className={noticeClass} data-testid="cloudflare-neon-notice">
-          Dyad will connect this Worker to your {neonBranch} Neon database and
-          allow sign-in from the Worker's address.
+          XDIRGA LABS will connect this Worker to your {neonBranch} Neon
+          database and allow sign-in from the Worker's address.
         </div>
       )}
 

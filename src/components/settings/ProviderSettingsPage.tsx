@@ -232,7 +232,7 @@ export function ProviderSettingsPage({ provider }: ProviderSettingsPageProps) {
           setApiKeyValidationDialog({
             message:
               error?.message ||
-              `Dyad could not verify this ${providerDisplayName} API key.`,
+              `XDIRGA LABS could not verify this ${providerDisplayName} API key.`,
             apiKey: normalizedValue,
             allowKeepInvalidKey: true,
             errorKind: getErrorKind(error),
@@ -309,7 +309,7 @@ export function ProviderSettingsPage({ provider }: ProviderSettingsPageProps) {
       setApiKeyValidationDialog({
         message:
           error?.message ||
-          `Dyad could not verify this ${providerDisplayName} API key.`,
+          `XDIRGA LABS could not verify this ${providerDisplayName} API key.`,
         apiKey: normalizedValue,
         allowKeepInvalidKey: false,
         errorKind: getErrorKind(error),
@@ -350,7 +350,7 @@ export function ProviderSettingsPage({ provider }: ProviderSettingsPageProps) {
         enableDyadPro: enabled,
       });
     } catch (error: any) {
-      showError(`Error toggling Dyad Pro: ${error}`);
+      showError(`Error toggling XDIRGA LABS Pro: ${error}`);
     } finally {
       setIsSaving(false);
     }
@@ -500,7 +500,7 @@ export function ProviderSettingsPage({ provider }: ProviderSettingsPageProps) {
                   AI access is ready
                 </h2>
                 <p className="mt-1 text-sm text-green-800/80 dark:text-green-200/80">
-                  You can now start building with Dyad.
+                  You can now start building with XDIRGA LABS.
                 </p>
               </div>
             </div>
@@ -567,13 +567,13 @@ export function ProviderSettingsPage({ provider }: ProviderSettingsPageProps) {
           {isDyad && !settingsLoading && (
             <div className="mt-6 flex items-center justify-between p-4 bg-(--background-lightest) rounded-lg border">
               <div>
-                <h3 className="font-medium">Enable Dyad Pro</h3>
+                <h3 className="font-medium">Enable XDIRGA LABS Pro</h3>
                 <p className="text-sm text-gray-600 dark:text-gray-400">
-                  Toggle to enable Dyad Pro
+                  Toggle to enable XDIRGA LABS Pro
                 </p>
               </div>
               <Switch
-                aria-label="Enable Dyad Pro"
+                aria-label="Enable XDIRGA LABS Pro"
                 checked={settings?.enableDyadPro}
                 onCheckedChange={handleToggleDyadPro}
                 disabled={isSaving}

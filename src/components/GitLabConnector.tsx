@@ -80,7 +80,7 @@ export function GitLabConnector({
             <p className="font-medium">Connected to a different GitLab</p>
             <p className="mt-1">
               This app is linked to {linkedGitLab.displayPath} on{" "}
-              {gitLabInstanceLabel(linkedGitLab.host ?? "")}, but Dyad is
+              {gitLabInstanceLabel(linkedGitLab.host ?? "")}, but XDIRGA LABS is
               connected to {gitLabInstanceLabel(status.instanceUrl ?? "")}.
               Enter a token for {gitLabInstanceLabel(linkedGitLab.host ?? "")}{" "}
               to sync it.

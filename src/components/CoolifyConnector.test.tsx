@@ -323,12 +323,12 @@ const NO_TOKEN = {
 };
 
 /** Installed, and its API token could not be minted — so no token, but a
-    server whose account Dyad is the only holder of. */
+    server whose account XDIRGA LABS is the only holder of. */
 const SERVER_NO_TOKEN = {
   status: { ...NO_TOKEN.status, serverUrl: "http://203.0.113.5:8000" },
 };
 
-describe("a server Dyad set up but has no token for", () => {
+describe("a server XDIRGA LABS set up but has no token for", () => {
   it("will not set up another over the top of it", async () => {
     // Installing again replaces the only copy of this one's password, so it
     // is not something a screen offers on the way past.
@@ -951,7 +951,7 @@ describe("the server and project pickers while discovery is in flight", () => {
     const user = userEvent.setup();
     render(<CoolifyConnector appId={1} />);
 
-    expect(screen.queryByText(/has no servers Dyad can see/)).toBeNull();
+    expect(screen.queryByText(/has no servers XDIRGA LABS can see/)).toBeNull();
     await user.click(screen.getByTestId("coolify-server-select"));
     expect(screen.getByText("Loading servers...")).toBeTruthy();
   });

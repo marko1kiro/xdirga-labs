@@ -395,8 +395,8 @@ export function FirstPromptProvider({
             </DialogTitle>
             <DialogDescription>
               {hasConfiguredProvider
-                ? "Change how Dyad accesses AI."
-                : "Choose how Dyad should access AI before generating your app."}
+                ? "Change how XDIRGA LABS accesses AI."
+                : "Choose how XDIRGA LABS should access AI before generating your app."}
             </DialogDescription>
           </DialogHeader>
           <SetupBanner variant="dialog" forceShow />

@@ -19,12 +19,12 @@ vi.mock("react-i18next", () => ({
         "preview.viewPreCommitOutput": "View check output",
         "preview.fixWithAi": "Fix with AI",
         "preview.fixWithAiDescription":
-          "Dyad will try to fix the reported issues.",
+          "XDIRGA LABS will try to fix the reported issues.",
         "preview.startingAiFix": "Opening chat...",
         "preview.checkingAiFixAvailability":
-          "Checking whether Dyad can fix this...",
+          "Checking whether XDIRGA LABS can fix this...",
         "preview.fixWithAiToolDenied":
-          "Dyad needs the run_pre_commit tool to fix this.",
+          "XDIRGA LABS needs the run_pre_commit tool to fix this.",
         "preview.fixWithAiQuotaExhausted":
           "You have used all of your free Agent messages.",
         "preview.fixWithAiUnavailable": "Fix with AI is unavailable right now.",
@@ -67,7 +67,7 @@ describe("CommitCheckFailureAlert", () => {
     expect(alert).toContain(
       "Your changes were not committed. Fix the reported issues and commit again.",
     );
-    expect(alert).toContain("Dyad will try to fix the reported issues.");
+    expect(alert).toContain("XDIRGA LABS will try to fix the reported issues.");
   });
 
   it("disables the action while chat is opening", () => {
@@ -90,7 +90,10 @@ describe("CommitCheckFailureAlert", () => {
   });
 
   it.each([
-    ["tool-permission", "Dyad needs the run_pre_commit tool to fix this."],
+    [
+      "tool-permission",
+      "XDIRGA LABS needs the run_pre_commit tool to fix this.",
+    ],
     ["quota-exhausted", "You have used all of your free Agent messages."],
     ["unknown", "Fix with AI is unavailable right now."],
   ] as const)(
@@ -132,7 +135,7 @@ describe("CommitCheckFailureAlert", () => {
     ) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(screen.getByRole("alert").textContent).toContain(
-      "Checking whether Dyad can fix this...",
+      "Checking whether XDIRGA LABS can fix this...",
     );
   });
 

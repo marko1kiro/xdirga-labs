@@ -1013,7 +1013,7 @@ describe("when it finishes", () => {
         tokenStored: false,
         apiEnabled: true,
         tokenUnavailableReason:
-          "Dyad could not save these details on this computer. Copy the " +
+          "XDIRGA LABS could not save these details on this computer. Copy the " +
           "password above before leaving this screen.",
       }),
     );

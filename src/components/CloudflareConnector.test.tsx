@@ -636,7 +636,7 @@ describe("choosing a Worker", () => {
     );
   });
 
-  it("tells a Neon app what Dyad will put on the Worker, for the branch it deploys", async () => {
+  it("tells a Neon app what XDIRGA LABS will put on the Worker, for the branch it deploys", async () => {
     loadedApp.value = {
       neonProjectId: "neon-1",
       selectedDatabaseBranchType: "development",
@@ -1030,7 +1030,7 @@ describe("a connected Worker", () => {
     // Also shown when the branch cannot be read, so it does not claim the
     // config is gone.
     expect(warning.textContent).toMatch(
-      /Dyad cannot find a Wrangler config or a Nitro app in worker on main\./,
+      /XDIRGA LABS cannot find a Wrangler config or a Nitro app in worker on main\./,
     );
     expect(screen.queryByText("No Cloudflare Worker found")).toBeNull();
     // Cloudflare cannot build it, so the card must not say that it deploys.

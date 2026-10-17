@@ -857,7 +857,7 @@ describe("VersionPreviewProvider", () => {
         selectedDiffFile: null,
         isDiffVisible: false,
       },
-      error: { message: "Resolve conflicts outside Dyad." },
+      error: { message: "Resolve conflicts outside XDIRGA LABS." },
       currentRepositoryAssessment: {
         type: "blocked",
         blocker: "conflicted",

@@ -82,7 +82,7 @@ export function ChatErrorBox({
             href="https://dyad.sh/pro?utm_source=dyad-app&utm_medium=app&utm_campaign=free-quota-error"
             variant="primary"
           >
-            Access with Dyad Pro
+            Access with XDIRGA LABS Pro
           </ExternalLink>
         </span>{" "}
         or switch to another model.
@@ -110,7 +110,7 @@ export function ChatErrorBox({
             href="https://dyad.sh/pro?utm_source=dyad-app&utm_medium=app&utm_campaign=rate-limit-error"
             variant="primary"
           >
-            Upgrade to Dyad Pro
+            Upgrade to XDIRGA LABS Pro
           </ExternalLink>
 
           <ExternalLink href="https://dyad.sh/docs/help/ai-rate-limit">
@@ -158,17 +158,17 @@ export function ChatErrorBox({
     return (
       <ChatErrorContainer onDismiss={onDismiss}>
         You have used all {messagesLimit} free Basic Agent messages for today.
-        {resetText} This message was not sent. Upgrade to Dyad Pro for unlimited
-        Agent access
+        {resetText} This message was not sent. Upgrade to XDIRGA LABS Pro for
+        unlimited Agent access
         {onSwitchToBuildMode
           ? ", or switch this chat to Build mode and send it again."
-          : ". To use Build mode, first choose a model other than Dyad Free, then send it again."}
+          : ". To use Build mode, first choose a model other than XDIRGA LABS Free, then send it again."}
         <div className="mt-2 flex flex-wrap gap-2">
           <ExternalLink
             href="https://dyad.sh/pro?utm_source=dyad-app&utm_medium=app&utm_campaign=free-agent-quota-exceeded"
             variant="primary"
           >
-            Upgrade to Dyad Pro
+            Upgrade to XDIRGA LABS Pro
           </ExternalLink>
           {onSwitchToBuildMode && (
             <Button
@@ -199,8 +199,8 @@ export function ChatErrorBox({
     return (
       <ChatErrorContainer onDismiss={onDismiss}>
         <span>
-          You have reached the {freeModelMessagesLimit}-message Dyad Free model
-          limit.
+          You have reached the {freeModelMessagesLimit}-message XDIRGA LABS Free
+          model limit.
           {resetText} Switch to paid models.{" "}
           <ExternalLink
             href="https://academy.dyad.sh/subscription?utm_source=dyad-app&utm_medium=app&utm_campaign=exceeded-budget-error"
@@ -226,7 +226,7 @@ export function ChatErrorBox({
               href="https://dyad.sh/pro?utm_source=dyad-app&utm_medium=app&utm_campaign=general-error"
               variant="primary"
             >
-              Upgrade to Dyad Pro
+              Upgrade to XDIRGA LABS Pro
             </ExternalLink>
           )}
         {isDyadProEnabled && onStartNewChat && (

@@ -54,7 +54,7 @@ export function GitLabCredentialsForm({
       : null;
   const insecure = validUrl && !isSecureInstanceUrl(instanceUrl);
   const tokenPageUrl = validUrl
-    ? `${normalizeGitLabInstanceUrl(instanceUrl)}/-/user_settings/personal_access_tokens?name=Dyad&scopes=api`
+    ? `${normalizeGitLabInstanceUrl(instanceUrl)}/-/user_settings/personal_access_tokens?name=XDIRGA LABS&scopes=api`
     : null;
 
   const connect = useMutation({

@@ -510,7 +510,7 @@ export function ConnectedGitHubConnector({
                   <p className="sr-only">
                     {(
                       conflictVerificationError ??
-                      "Dyad couldn't check the repository."
+                      "XDIRGA LABS couldn't check the repository."
                     )
                       .split("\n", 1)[0]
                       .slice(0, 240)}
@@ -523,7 +523,7 @@ export function ConnectedGitHubConnector({
                   <GitHubOperationError
                     message={
                       conflictVerificationError ??
-                      "Dyad couldn't check the repository."
+                      "XDIRGA LABS couldn't check the repository."
                     }
                     providerLabel={providerLabel}
                   />

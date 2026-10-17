@@ -69,5 +69,5 @@ export async function resolveAppNameForAppId(
     console.error("[CHAT_UTILS] Failed to resolve app name via IPC:", error);
   }
 
-  return "Dyad";
+  return "XDIRGA LABS";
 }

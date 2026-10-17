@@ -56,7 +56,7 @@ export function ClaudeCodeSubscriptionMenu({
               <Info className="size-3.5" />
             </TooltipTrigger>
             <TooltipContent>
-              Claude subscription limits apply. Pro Agent also uses Dyad
+              Claude subscription limits apply. Pro Agent also uses XDIRGA LABS
               credits.
             </TooltipContent>
           </Tooltip>

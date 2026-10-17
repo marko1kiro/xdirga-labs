@@ -138,7 +138,7 @@ describe("revealing one value", () => {
 });
 
 describe("naming the section", () => {
-  it("names a server Dyad installed but has no token for", async () => {
+  it("names a server XDIRGA LABS installed but has no token for", async () => {
     // Reached by installing a server whose API token could not be minted, so
     // the account is all Dyad has for it.
     h.revealCredentials.mockResolvedValue({ ...FULL, instance: null });
@@ -182,7 +182,7 @@ describe("while the read is still going", () => {
   });
 });
 
-describe("a password Dyad holds but cannot read", () => {
+describe("a password XDIRGA LABS holds but cannot read", () => {
   it("says so rather than showing a server that never had one", async () => {
     // readSettings drops a password it cannot decrypt and keeps the account.
     // Left as a missing row, that reads as there never having been one — and
@@ -326,7 +326,7 @@ describe("a read that did not answer", () => {
   });
 });
 
-describe("an instance Dyad did not set up", () => {
+describe("an instance XDIRGA LABS did not set up", () => {
   it("renders nothing rather than an empty heading", async () => {
     // Connected by pasting a token: no account Dyad created, no address it
     // chose. A panel of blanks would read as something having failed.

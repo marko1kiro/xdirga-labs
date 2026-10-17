@@ -58,7 +58,7 @@ describe("pickPromoMessage", () => {
 });
 
 describe("shouldShowPromoMessage", () => {
-  it("shows for a non-Pro user even when the Dyad Pro toggle is enabled", () => {
+  it("shows for a non-Pro user even when the XDIRGA LABS Pro toggle is enabled", () => {
     const settings = {
       ...settingsWithAutoKey(),
       enableDyadPro: true,

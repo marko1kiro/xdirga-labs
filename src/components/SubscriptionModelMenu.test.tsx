@@ -198,7 +198,9 @@ it("allows free users to connect without the usage-fee sentence", async () => {
       /defaults for new chats. Existing chats keep their model selection/,
     ),
   ).toBeVisible();
-  expect(screen.queryByText(/no Dyad usage fees/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/no XDIRGA LABS usage fees/),
+  ).not.toBeInTheDocument();
   expect(
     screen.queryByText(/Basic Agent limits still apply/),
   ).not.toBeInTheDocument();
@@ -208,7 +210,9 @@ it("allows free users to connect without the usage-fee sentence", async () => {
 it("does not offer connection until billing settings are loaded", async () => {
   mocks.settingsLoading = true;
   await open();
-  expect(await screen.findByText("Checking Dyad Pro status…")).toBeVisible();
+  expect(
+    await screen.findByText("Checking XDIRGA LABS Pro status…"),
+  ).toBeVisible();
   expect(
     screen.getByRole("menuitem", { name: "Connect with ChatGPT" }),
   ).toHaveAttribute("aria-disabled", "true");
@@ -219,7 +223,9 @@ it("keeps connected copy neutral while billing settings load", async () => {
   mocks.settingsLoading = true;
   mocks.connected = true;
   await open();
-  expect(await screen.findByText("Checking Dyad Pro status…")).toBeVisible();
+  expect(
+    await screen.findByText("Checking XDIRGA LABS Pro status…"),
+  ).toBeVisible();
   expect(
     screen.queryByText("Disconnect ChatGPT to use your OpenAI API key."),
   ).toBeNull();

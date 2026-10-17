@@ -21,10 +21,10 @@ export function ClaudeCodeSubscriptionExperimentSwitch() {
       </div>
       <p className="text-[13px] leading-relaxed text-muted-foreground">
         Use the official local Claude Code CLI with your Claude subscription.
-        Agent mode with Dyad Pro also uses Dyad credits, like ChatGPT
-        subscription. Build, Ask and Plan do not use Dyad credits. Disabling
-        this experiment prevents new Claude Code turns; existing chats stay
-        unchanged.
+        Agent mode with XDIRGA LABS Pro also uses XDIRGA LABS credits, like
+        ChatGPT subscription. Build, Ask and Plan do not use XDIRGA LABS
+        credits. Disabling this experiment prevents new Claude Code turns;
+        existing chats stay unchanged.
       </p>
     </div>
   );

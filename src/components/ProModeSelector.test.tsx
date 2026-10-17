@@ -61,7 +61,9 @@ it("defaults to subscription when connected and writes a global preference", asy
   expect(
     screen.getByRole("button", { name: "ChatGPT Subscription" }),
   ).toHaveAttribute("aria-pressed", "true");
-  await user.click(screen.getByRole("button", { name: "Dyad Pro credits" }));
+  await user.click(
+    screen.getByRole("button", { name: "XDIRGA LABS Pro credits" }),
+  );
   expect(mocks.update).toHaveBeenCalledWith({ proModelUsage: "pro" });
 });
 it("disables subscription when disconnected", async () => {
@@ -73,19 +75,21 @@ it("disables subscription when disconnected", async () => {
     screen.getByRole("button", { name: "ChatGPT Subscription" }),
   ).toBeDisabled();
   expect(
-    screen.getByRole("button", { name: "Dyad Pro credits" }),
+    screen.getByRole("button", { name: "XDIRGA LABS Pro credits" }),
   ).toHaveAttribute("aria-pressed", "true");
 });
 
 it.each(["click", "keyboard"])(
-  "persists Dyad Pro credits from a disconnected subscription preference via %s",
+  "persists XDIRGA LABS Pro credits from a disconnected subscription preference via %s",
   async (method) => {
     mocks.connected = false;
     mocks.usage = "subscription";
     const user = userEvent.setup();
     render(<ProModeSelector />);
     await user.click(screen.getByRole("button", { name: "Pro" }));
-    const credits = screen.getByRole("button", { name: "Dyad Pro credits" });
+    const credits = screen.getByRole("button", {
+      name: "XDIRGA LABS Pro credits",
+    });
     expect(credits).toHaveAttribute("aria-pressed", "true");
     if (method === "click") await user.click(credits);
     else {
@@ -124,9 +128,13 @@ it.each([true, false])(
       screen.queryByText(/Provider charges apply separately/),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText(/Pro helper tasks use cloud models through Dyad/),
+      screen.queryByText(
+        /Pro helper tasks use cloud models through XDIRGA LABS/,
+      ),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Dyad Pro credits" }));
+    await user.click(
+      screen.getByRole("button", { name: "XDIRGA LABS Pro credits" }),
+    );
     expect(mocks.update).toHaveBeenCalledExactlyOnceWith({
       proModelUsage: "pro",
     });
@@ -148,10 +156,10 @@ it.each(["chatgpt", "claude"])(
       screen.getByRole("button", { name: "Your API keys" }),
     ).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.getByRole("button", { name: "Dyad Pro credits" }),
+      screen.getByRole("button", { name: "XDIRGA LABS Pro credits" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("switch", { name: "Enable Dyad Pro" }),
+      screen.getByRole("switch", { name: "Enable XDIRGA LABS Pro" }),
     ).toHaveAttribute("aria-disabled", "true");
     await user.click(
       screen.getByRole("button", {

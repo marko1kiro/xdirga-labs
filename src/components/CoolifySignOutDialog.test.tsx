@@ -169,7 +169,7 @@ describe("nothing to look at yet", () => {
     open();
 
     expect(
-      await screen.findAllByText(/Looking up what Dyad has stored/),
+      await screen.findAllByText(/Looking up what XDIRGA LABS has stored/),
     ).toHaveLength(1);
   });
 
@@ -219,7 +219,7 @@ describe("the last look", () => {
     );
   });
 
-  it("does not say it for an instance Dyad did not set up", async () => {
+  it("does not say it for an instance XDIRGA LABS did not set up", async () => {
     // Connected by pasting a token, so nothing here was invented by Dyad and
     // a warning about losing it forever would be untrue.
     h.revealCredentials.mockResolvedValue({ ...FULL, server: null });

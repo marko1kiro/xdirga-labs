@@ -1104,8 +1104,8 @@ export function HelpDialog() {
             onClick={() => setIsHelpBotOpen(true)}
             className="w-full py-6 border-primary/50 shadow-sm shadow-primary/10 transition-all hover:shadow-md hover:shadow-primary/15"
           >
-            <SparklesIcon className="mr-2 h-5 w-5" /> Chat with Dyad help bot
-            (Pro)
+            <SparklesIcon className="mr-2 h-5 w-5" /> Chat with XDIRGA LABS help
+            bot (Pro)
           </Button>
         ) : (
           <Button

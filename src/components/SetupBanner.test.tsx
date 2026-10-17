@@ -93,7 +93,9 @@ it("offers ChatGPT sign-in without a Pro key and keeps other providers accessibl
   expect(
     screen.queryByRole("button", { name: "Google Free" }),
   ).not.toBeInTheDocument();
-  expect(screen.queryByText(/No Dyad usage fees/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/No XDIRGA LABS usage fees/),
+  ).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "ChatGPT subscription Free" }),
   ).toBeVisible();
@@ -144,14 +146,18 @@ it("omits subscription pricing when Pro is active", () => {
   expect(
     screen.getByRole("button", { name: "ChatGPT subscription" }),
   ).toBeVisible();
-  expect(screen.queryByText(/No Dyad usage fees/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/No XDIRGA LABS usage fees/),
+  ).not.toBeInTheDocument();
 });
 
 it("waits for settings before showing fees or permitting connection", () => {
   mocks.settingsLoading = true;
   setup();
-  expect(screen.getByText("Checking Dyad Pro status…")).toBeVisible();
-  expect(screen.queryByText(/No Dyad usage fees/)).not.toBeInTheDocument();
+  expect(screen.getByText("Checking XDIRGA LABS Pro status…")).toBeVisible();
+  expect(
+    screen.queryByText(/No XDIRGA LABS usage fees/),
+  ).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "ChatGPT subscription" }),
   ).toBeDisabled();

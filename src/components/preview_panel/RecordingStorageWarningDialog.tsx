@@ -39,7 +39,7 @@ export function RecordingStorageWarningDialog({
             Start recording from a clean slate?
           </AlertDialogTitle>
           <AlertDialogDescription>
-            Dyad clears this preview's cookies and local storage before
+            XDIRGA LABS clears this preview's cookies and local storage before
             recording. This usually signs you out and removes anything the app
             stored in the browser. With app-specific localhost addresses, other
             apps' storage is left alone; shared localhost cookies are kept and

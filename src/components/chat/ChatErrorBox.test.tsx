@@ -55,7 +55,7 @@ describe("ChatErrorBox Basic Agent quota error", () => {
     ).toBeTruthy();
     expect(screen.getByText(/Your quota resets at/)).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Upgrade to Dyad Pro"));
+    fireEvent.click(screen.getByText("Upgrade to XDIRGA LABS Pro"));
     expect(mocks.openExternalUrl).toHaveBeenCalledWith(
       "https://dyad.sh/pro?utm_source=dyad-app&utm_medium=app&utm_campaign=free-agent-quota-exceeded",
     );
@@ -65,7 +65,7 @@ describe("ChatErrorBox Basic Agent quota error", () => {
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
-  it("explains that Dyad Free must be changed before using Build", () => {
+  it("explains that XDIRGA LABS Free must be changed before using Build", () => {
     render(
       <ChatErrorBox
         error='{"type":"FREE_AGENT_QUOTA_EXCEEDED","resetTime":1787295600000}'
@@ -75,7 +75,7 @@ describe("ChatErrorBox Basic Agent quota error", () => {
     );
 
     expect(
-      screen.getByText(/first choose a model other than Dyad Free/),
+      screen.getByText(/first choose a model other than XDIRGA LABS Free/),
     ).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Switch to Build" }),
@@ -191,9 +191,11 @@ describe("ChatErrorBox legacy rejected Pro key", () => {
           onStartNewChat={vi.fn()}
         />,
       );
-      expect(screen.getByText("Your Dyad Pro key was rejected")).toBeTruthy();
+      expect(
+        screen.getByText("Your XDIRGA LABS Pro key was rejected"),
+      ).toBeTruthy();
       expect(screen.getByText("Get your current Pro key.")).toBeTruthy();
-      expect(screen.queryByText("Upgrade to Dyad Pro")).toBeNull();
+      expect(screen.queryByText("Upgrade to XDIRGA LABS Pro")).toBeNull();
       expect(screen.queryByText("Start new chat")).toBeNull();
       expect(screen.queryByText("Read docs")).toBeNull();
       fireEvent.click(

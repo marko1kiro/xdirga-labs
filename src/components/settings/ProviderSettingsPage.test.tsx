@@ -178,13 +178,13 @@ describe("ProviderSettingsPage", () => {
     });
   });
 
-  it("resumes an implicit first prompt with the new Dyad Pro default", async () => {
+  it("resumes an implicit first prompt with the new XDIRGA LABS Pro default", async () => {
     mocks.hasArmedPayload = true;
     mocks.validateProviderApiKey.mockResolvedValue(undefined);
     mocks.updateSettings.mockResolvedValue(undefined);
 
     renderProviderSettingsPage("auto");
-    await saveApiKey("Dyad", "auto");
+    await saveApiKey("XDIRGA LABS", "auto");
 
     await waitFor(() =>
       expect(mocks.sendFirstPrompt).toHaveBeenCalledWith({

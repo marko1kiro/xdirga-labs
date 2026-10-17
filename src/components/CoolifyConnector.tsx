@@ -480,7 +480,7 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
               className="rounded-md border p-3 text-sm"
               data-testid="coolify-already-has-server"
             >
-              <p className="font-medium">Dyad already set up a server</p>
+              <p className="font-medium">XDIRGA LABS already set up a server</p>
               <p className="text-muted-foreground">
                 Its details are below. Finish connecting to it, or sign out to
                 set up a different one — signing out forgets these.
@@ -555,7 +555,7 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
           />
           {status.serverUrl && (
             <p className="text-muted-foreground text-xs">
-              The server Dyad set up. Sign out to connect to a different
+              The server XDIRGA LABS set up. Sign out to connect to a different
               Coolify.
             </p>
           )}
@@ -579,9 +579,9 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
           <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
             <p>
               This address is not encrypted, so anything on the network between
-              you and the server can read what Dyad sends over it. That is not
-              only the API token: deploying also uploads the SSH private key
-              Coolify uses to clone your repository, and your database
+              you and the server can read what XDIRGA LABS sends over it. That
+              is not only the API token: deploying also uploads the SSH private
+              key Coolify uses to clone your repository, and your database
               connection string with its password. Giving Coolify a domain and
               certificate avoids this.
             </p>
@@ -631,7 +631,7 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
 
         {/* Back to the installer, for someone who came here by mistake, and
             the only way back to a failure it is reporting. Not offered while
-            Dyad holds a server's account and has nothing to report: that
+            XDIRGA LABS holds a server's account and has nothing to report: that
             screen refuses to set up another anyway, and signing out is the
             way there. */}
         {status.serverUrl && !isReportingFailure ? (
@@ -643,7 +643,7 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
                   did set up. Offering to set one up "yet" over the top of it
                   describes somebody else's situation. */}
               {status.serverUrl
-                ? "Dyad set up a server here and the run has something to say about it. "
+                ? "XDIRGA LABS set up a server here and the run has something to say about it. "
                 : "No Coolify server yet? "}
               <button
                 type="button"
@@ -713,8 +713,8 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
 
         <div className="flex items-center justify-between">
           <p className="text-xs text-muted-foreground">
-            Dyad cannot tell when servers or projects change in Coolify, so this
-            list is cached. Refresh after adding one.
+            XDIRGA LABS cannot tell when servers or projects change in Coolify,
+            so this list is cached. Refresh after adding one.
           </p>
           {/* Outside the error card: rotating a token or moving to another
               instance must not require breaking discovery first. */}
@@ -738,8 +738,8 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
         {isEditingConnection && movingHost && (
           <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
             Moving this app leaves the application on its current server
-            running, and Dyad stops tracking it. Deploying here builds a new
-            one; removing the old one means going into Coolify.
+            running, and XDIRGA LABS stops tracking it. Deploying here builds a
+            new one; removing the old one means going into Coolify.
           </div>
         )}
 
@@ -790,8 +790,8 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
           !discoveryError &&
           (discovery?.servers ?? []).length === 0 && (
             <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-              This Coolify instance has no servers Dyad can see. Add one in
-              Coolify under Servers, then refresh.
+              This Coolify instance has no servers XDIRGA LABS can see. Add one
+              in Coolify under Servers, then refresh.
             </div>
           )}
 
@@ -1112,14 +1112,15 @@ export function CoolifyConnector({ appId }: { appId: number | null }) {
                     {snapshot.type === "running"
                       ? "This also abandons the deployment currently running. "
                       : null}
-                    The application keeps running on your server, but Dyad
-                    forgets how to reach it. Connecting this app again builds a
-                    second one beside it, and the two will compete for the same
-                    domain. Removing the first means going into Coolify.
+                    The application keeps running on your server, but XDIRGA
+                    LABS forgets how to reach it. Connecting this app again
+                    builds a second one beside it, and the two will compete for
+                    the same domain. Removing the first means going into
+                    Coolify.
                   </p>
                   <p>
-                    If you have deployed this app, Dyad's deploy key stays in
-                    the {repoProviderLabel} repository, so your server keeps
+                    If you have deployed this app, XDIRGA LABS deploy key stays
+                    in the {repoProviderLabel} repository, so your server keeps
                     read access to your code. You can remove the key by going to
                     your repository's Deploy Key settings on {repoProviderLabel}
                     .

@@ -1174,7 +1174,7 @@ export function ModelPicker() {
         aria-label={
           isFreeProviderRow
             ? `${model.displayName} — requires an API key from ${getProviderDisplayName(providerId)}`
-            : `${model.displayName} — requires Dyad Pro or an API key from ${getProviderDisplayName(providerId)}`
+            : `${model.displayName} — requires XDIRGA LABS Pro or an API key from ${getProviderDisplayName(providerId)}`
         }
         onClick={() => handleLockedModelClick(providerId, model)}
       >
@@ -1633,7 +1633,7 @@ export function ModelPicker() {
               <>
                 <div className="px-2 py-3 bg-gradient-to-r from-indigo-50 to-sky-50 dark:from-indigo-950/50 dark:to-sky-950/50">
                   <p className="text-sm text-indigo-700 dark:text-indigo-300 mb-2">
-                    Upgrade from Dyad Pro trial to unlock more models.
+                    Upgrade from XDIRGA LABS Pro trial to unlock more models.
                   </p>
                   <Button
                     variant="outline"
@@ -1646,7 +1646,7 @@ export function ModelPicker() {
                       setOpen(false);
                     }}
                   >
-                    Upgrade to Dyad Pro
+                    Upgrade to XDIRGA LABS Pro
                   </Button>
                 </div>
                 <DropdownMenuSeparator />
@@ -1929,7 +1929,7 @@ export function ModelPicker() {
                   <div className="flex items-center gap-2 w-full">
                     <SparklesIcon className="size-3.5 text-indigo-600 dark:text-indigo-300 shrink-0" />
                     <span className="text-[13px] font-medium text-indigo-700 dark:text-indigo-300">
-                      Unlock all models with Dyad Pro
+                      Unlock all models with XDIRGA LABS Pro
                     </span>
                   </div>
                 </DropdownMenuItem>
@@ -1978,12 +1978,12 @@ export function ModelPicker() {
             <>
               <DialogHeader>
                 <DialogTitle>
-                  Unlock {unlockTarget?.model.displayName} with Dyad Pro
+                  Unlock {unlockTarget?.model.displayName} with XDIRGA LABS Pro
                 </DialogTitle>
                 <DialogDescription>
-                  Dyad Pro gives you {unlockTarget?.model.displayName} and every
-                  other leading AI model with one subscription — no API keys
-                  needed.
+                  XDIRGA LABS Pro gives you {unlockTarget?.model.displayName}{" "}
+                  and every other leading AI model with one subscription — no
+                  API keys needed.
                 </DialogDescription>
               </DialogHeader>
               <div className="flex flex-col gap-3">
@@ -1991,7 +1991,7 @@ export function ModelPicker() {
                   className="cursor-pointer w-full"
                   onClick={handleUnlockDialogUpgradeClick}
                 >
-                  Get Dyad Pro
+                  Get XDIRGA LABS Pro
                 </Button>
                 <button
                   type="button"

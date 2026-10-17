@@ -75,10 +75,10 @@ export function CoolifySignOutDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Sign out of Coolify?</AlertDialogTitle>
           <AlertDialogDescription>
-            Dyad will forget the details below. Your server keeps running and
-            your apps keep their settings.
+            XDIRGA LABS will forget the details below. Your server keeps running
+            and your apps keep their settings.
             {credentials?.server?.password
-              ? " Dyad made this password up and is the only thing holding it — Coolify cannot show it to you again."
+              ? " XDIRGA LABS made this password up and is the only thing holding it — Coolify cannot show it to you again."
               : ""}
           </AlertDialogDescription>
         </AlertDialogHeader>
