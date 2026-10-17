@@ -26,7 +26,10 @@ vi.mock("../utils/model_effort", () => ({
   resolveModelSelection: async ({ model }: { model: ModelSelection }) => model,
 }));
 import type { AutoModelCandidates } from "./auto_model_candidates";
-import { preflightSubscriptionTurn as preflightWithAdmission } from "./subscription_turn_preflight";
+import {
+  preflightSubscriptionTurn as preflightWithAdmission,
+  selectionsNeedDyadAdmission,
+} from "./subscription_turn_preflight";
 // These tests focus on model routing; admission consumption has its own tests.
 async function preflightSubscriptionTurn(
   ...args: Parameters<typeof preflightWithAdmission>
@@ -491,6 +494,38 @@ describe("cancelled admission", () => {
     ).rejects.toThrow();
     expect(mocks.credentials).not.toHaveBeenCalled();
     expect(mocks.credits).not.toHaveBeenCalled();
+  });
+});
+
+describe("custom provider admission", () => {
+  it("does not need Dyad admission for custom api-key models", async () => {
+    await expect(
+      selectionsNeedDyadAdmission(
+        [
+          {
+            provider: "custom",
+            name: "xdirgalabs",
+            connection: "api-key",
+          } as ModelSelection,
+        ],
+        settings,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it("needs Dyad admission for non-custom api-key models", async () => {
+    await expect(
+      selectionsNeedDyadAdmission(
+        [
+          {
+            provider: "openai",
+            name: "gpt-4o",
+            connection: "api-key",
+          } as ModelSelection,
+        ],
+        settings,
+      ),
+    ).resolves.toBe(true);
   });
 });
 
