@@ -59,6 +59,7 @@ jobs:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
       - name: Unit tests (shard 2/2)
+        if: always()
         run: npx vitest run --shard=2/2
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
