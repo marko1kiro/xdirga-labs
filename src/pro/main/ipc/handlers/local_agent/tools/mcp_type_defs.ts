@@ -1,0 +1,483 @@
+import { recordShellReviewOutcome } from "../shell_review_history";
+import type { IpcMainInvokeEvent } from "electron";
+import { randomUUID } from "node:crypto";
+import { asSchema } from "@ai-sdk/provider-utils";
+import type { JSONSchema7 } from "@ai-sdk/provider";
+import log from "electron-log";
+import {
+  MCP_LIST_TOOLS_TIMEOUT_MS,
+  McpListToolsTimeoutError,
+  mcpManager,
+  type McpToolSet,
+} from "@/ipc/utils/mcp_manager";
+import { SANDBOX_HOST_CALL_NAMES } from "@/ipc/utils/sandbox/capabilities";
+import { mcpServers } from "@/db/schema";
+import { db } from "@/db";
+import { eq } from "drizzle-orm";
+import { sanitizeMcpName } from "@/ipc/utils/mcp_tool_utils";
+import { requireMcpToolConsent } from "@/ipc/utils/mcp_consent";
+import { readSettings } from "@/main/settings";
+import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
+import { AgentContext, escapeXmlAttr, escapeXmlContent } from "./types";
+import { jsonSchemaToTs } from "./json_schema_to_ts";
+import { buildMcpAutoApprove } from "../mcp_auto_consent";
+import { sanitizeMcpToolResult } from "@/ipc/utils/mcp_result_sanitizer";
+import { withTrackedMutation } from "../subagents/mutation_activity_tracker";
+
+const logger = log.scope("mcp_tools");
+
+const MCP_RESULT_TYPE = `type McpResult = {
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+    | { type: "resource"; resource: unknown }
+  >;
+  isError?: boolean;
+};`;
+
+export interface McpToolDef {
+  /** JS-safe function identifier exposed inside sandbox. */
+  jsName: string;
+  /** Original MCP tool key (serverName__toolName, matching getMcpTools). */
+  toolKey: string;
+  serverId: number;
+  serverName: string;
+  toolName: string;
+  description?: string;
+  /** Tool input schema, normalized to JSON Schema at collection time. */
+  inputSchema: JSONSchema7;
+}
+
+let cachedMcpToolDefs: McpToolDef[] = [];
+
+export function getCachedMcpToolDefs(): McpToolDef[] {
+  return [...cachedMcpToolDefs];
+}
+
+/**
+ * Convert sanitized MCP tool key to a JS-safe identifier.
+ * MCP keys allow hyphens; JS identifiers do not.
+ */
+function toJsIdentifier(name: string): string {
+  let id = name.replace(/[^A-Za-z0-9_$]/g, "_");
+  if (/^[0-9]/.test(id)) {
+    id = `_${id}`;
+  }
+  return id;
+}
+
+export interface LoadedMcpServerTools {
+  server: typeof mcpServers.$inferSelect;
+  tools: McpToolSet;
+}
+
+/**
+ * Load tools from every enabled MCP server for one agent turn. Servers load
+ * in parallel, each bounded by a timeout and the turn's abort signal, so one
+ * unresponsive server can neither stall the turn nor ignore Stop. Servers
+ * that fail or time out are skipped; results keep the servers' query order.
+ */
+export async function loadEnabledMcpServerTools({
+  abortSignal,
+  onWarningMessage,
+}: {
+  abortSignal?: AbortSignal;
+  onWarningMessage?: (message: string) => void;
+} = {}): Promise<LoadedMcpServerTools[]> {
+  const servers = await db
+    .select()
+    .from(mcpServers)
+    .where(eq(mcpServers.enabled, true as any));
+  if (servers.length === 0) return [];
+
+  const startedAt = performance.now();
+  const results = await Promise.all(
+    servers.map(async (server) => {
+      const serverStartedAt = performance.now();
+      try {
+        const tools = await mcpManager.listToolsWithin(server.id, {
+          signal: abortSignal,
+        });
+        logger.info(
+          `Loaded ${Object.keys(tools).length} tools from MCP server ${server.id} (${server.name}) in ${elapsedMs(serverStartedAt)}ms`,
+        );
+        return { server, tools };
+      } catch (error) {
+        if (abortSignal?.aborted) return null;
+        if (error instanceof McpListToolsTimeoutError) {
+          const seconds = MCP_LIST_TOOLS_TIMEOUT_MS / 1000;
+          logger.warn(
+            `MCP server ${server.id} (${server.name}, ${server.transport}) did not return tools within ${seconds}s; skipping it for this turn`,
+          );
+          onWarningMessage?.(
+            `MCP server "${server.name}" didn't respond within ${seconds}s, so its tools weren't available for this response.`,
+          );
+        } else {
+          logger.warn(
+            `Failed to load tools for MCP server ${server.id} (${server.name})`,
+            error,
+          );
+        }
+        return null;
+      }
+    }),
+  );
+
+  const loaded = results.filter(
+    (result): result is LoadedMcpServerTools => result !== null,
+  );
+  logger.info(
+    `Loaded MCP tools from ${loaded.length}/${servers.length} servers in ${elapsedMs(startedAt)}ms`,
+  );
+  return loaded;
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.round(performance.now() - startedAt);
+}
+
+export async function collectMcpToolDefs(
+  options: Parameters<typeof loadEnabledMcpServerTools>[0] = {},
+): Promise<McpToolDef[]> {
+  let loadedServers: LoadedMcpServerTools[];
+  try {
+    loadedServers = await loadEnabledMcpServerTools(options);
+  } catch {
+    cachedMcpToolDefs = [];
+    return [];
+  }
+
+  const defs: McpToolDef[] = [];
+  // `toJsIdentifier` replaces any character outside [A-Za-z0-9_$] with `_`,
+  // which is not one-to-one — two distinct tool keys (e.g. `srv-foo__t` and
+  // `srv_foo__t`) can collapse to the same JS identifier. Disambiguate by
+  // appending a numeric suffix on collision so each MCP tool maps to a
+  // unique sandbox capability.
+  //
+  // Seeded with the built-in file host fns so an MCP tool whose
+  // sanitized name happens to match (e.g. `read_file`) is renamed
+  // rather than silently shadowing the file capability when the two
+  // maps are merged.
+  const seenJsNames = new Set<string>(SANDBOX_HOST_CALL_NAMES);
+  for (const { server: s, tools: toolSet } of loadedServers) {
+    const serverNameSanitized = sanitizeMcpName(s.name || "");
+    for (const [toolName, mcpTool] of Object.entries(toolSet)) {
+      const sanitizedToolName = sanitizeMcpName(toolName);
+      const toolKey = `${serverNameSanitized}__${sanitizedToolName}`;
+      const baseJsName = toJsIdentifier(toolKey);
+      let jsName = baseJsName;
+      let suffix = 2;
+      while (seenJsNames.has(jsName)) {
+        jsName = `${baseJsName}_${suffix}`;
+        suffix += 1;
+      }
+      seenJsNames.add(jsName);
+      let inputSchema: JSONSchema7;
+      try {
+        inputSchema = await asSchema(mcpTool.inputSchema).jsonSchema;
+      } catch {
+        inputSchema = {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        };
+      }
+      defs.push({
+        jsName,
+        toolKey,
+        serverId: s.id,
+        serverName: s.name || "",
+        toolName,
+        description: mcpTool.description,
+        inputSchema,
+      });
+    }
+  }
+  // A stopped turn returns only the servers that finished loading; keep the
+  // last complete set for the renderer's token estimate instead.
+  if (!options.abortSignal?.aborted) {
+    cachedMcpToolDefs = defs;
+  }
+  return defs;
+}
+
+/**
+ * Build the capability map exposed to MustardScript for MCP tool calls.
+ * Each entry wraps an MCP tool with consent enforcement and XML emission to
+ * the UI, mirroring the behavior of individually-registered MCP tools.
+ */
+export function buildMcpCapabilityMap(params: {
+  event: IpcMainInvokeEvent;
+  ctx: AgentContext;
+  defs: McpToolDef[];
+}): Record<string, (...args: unknown[]) => unknown> {
+  const map: Record<string, (...args: unknown[]) => unknown> = {};
+
+  for (const def of params.defs) {
+    map[def.jsName] = async (rawArgs: unknown) => {
+      const args = rawArgs ?? {};
+      // Correlates the call/result blocks for the merged UI card. The SDK
+      // toolCallId isn't available on this sandbox path, so generate one.
+      const callId = randomUUID();
+      const inputPreview =
+        typeof args === "string"
+          ? args
+          : Array.isArray(args)
+            ? args.join(" ")
+            : JSON.stringify(args).slice(0, 500);
+
+      const autoApprove = buildMcpAutoApprove({
+        signal: params.ctx.abortSignal,
+        settings: readSettings(),
+        isDyadPro: params.ctx.isDyadPro,
+        freeModelMode: params.ctx.freeModelMode,
+        chatId: params.ctx.chatId,
+        serverName: def.serverName,
+        toolName: def.toolName,
+        toolDescription: def.description,
+        inputSchema: def.inputSchema,
+        args,
+      });
+
+      const { approved, autoApprovedReason } = await requireMcpToolConsent(
+        params.event,
+        {
+          serverId: def.serverId,
+          serverName: def.serverName,
+          toolName: def.toolName,
+          toolDescription: def.description,
+          inputPreview,
+          chatId: params.ctx.chatId,
+          autoApprove,
+          abortSignal: params.ctx.abortSignal,
+        },
+      );
+      if (!approved) {
+        recordShellReviewOutcome(params.ctx, def.toolKey, args, {
+          error: "Consent declined",
+          executed: false,
+        });
+        throw new DyadError(
+          `User declined running tool ${def.toolKey}`,
+          DyadErrorKind.UserCancelled,
+        );
+      }
+
+      const contentPretty = JSON.stringify(args, null, 2);
+      const autoApprovedAttr = autoApprovedReason
+        ? ` auto-approved-reason="${escapeXmlAttr(autoApprovedReason)}"`
+        : "";
+      params.ctx.onXmlComplete(
+        `<dyad-mcp-tool-call server="${escapeXmlAttr(def.serverName)}" tool="${escapeXmlAttr(def.toolName)}" call-id="${escapeXmlAttr(callId)}"${autoApprovedAttr}>\n${escapeXmlContent(contentPretty)}\n</dyad-mcp-tool-call>`,
+      );
+
+      let executionStarted = false;
+      try {
+        // Reserve mutation activity right after consent, before the client
+        // lookup. Otherwise a Stop during the lookup can finalize the turn
+        // and the tool would still run afterwards. The lookup is bounded by
+        // the turn's signal and a timeout so a wedged server cannot hold the
+        // reservation open.
+        const res = await withTrackedMutation(params.ctx, async () => {
+          const cancelled = () =>
+            new DyadError(
+              "This agent run was cancelled.",
+              DyadErrorKind.UserCancelled,
+            );
+          let toolSet: McpToolSet;
+          try {
+            toolSet = await mcpManager.listToolsWithin(def.serverId, {
+              signal: params.ctx.abortSignal,
+            });
+          } catch (error) {
+            throw params.ctx.abortSignal?.aborted ? cancelled() : error;
+          }
+          const mcpTool = toolSet[def.toolName];
+          if (!mcpTool || typeof mcpTool.execute !== "function") {
+            throw new DyadError(
+              `MCP tool ${def.toolKey} not found at runtime`,
+              DyadErrorKind.NotFound,
+            );
+          }
+          if (params.ctx.abortSignal?.aborted) throw cancelled();
+          params.ctx.mcpToolRan = true;
+          executionStarted = true;
+          return mcpTool.execute(args, {
+            toolCallId: `mcp-sandbox-${def.toolKey}`,
+            messages: [],
+          });
+        });
+        // The SDK sometimes returns a plain string for text-only MCP
+        // tools. Wrap it into the McpResult shape we advertise in the
+        // declarations so scripts can rely on `.content` regardless.
+        const normalized =
+          typeof res === "string"
+            ? { content: [{ type: "text", text: res }] }
+            : res;
+        const safeResult = sanitizeMcpToolResult(normalized);
+        recordShellReviewOutcome(params.ctx, def.toolKey, args, {
+          result: safeResult.value,
+        });
+        params.ctx.onXmlComplete(
+          `<dyad-mcp-tool-result server="${escapeXmlAttr(def.serverName)}" tool="${escapeXmlAttr(def.toolName)}" call-id="${escapeXmlAttr(callId)}">\n${escapeXmlContent(safeResult.serialized)}\n</dyad-mcp-tool-result>`,
+        );
+        return safeResult.value;
+      } catch (error) {
+        recordShellReviewOutcome(params.ctx, def.toolKey, args, {
+          error,
+          executed: executionStarted,
+        });
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const errorStack =
+          error instanceof Error && error.stack ? error.stack : "";
+        const safeErrorMessage = sanitizeMcpToolResult(errorMessage).serialized;
+        const safeErrorDetails = sanitizeMcpToolResult(
+          errorStack || errorMessage,
+        ).serialized;
+        // Terminate the merged card in an error state instead of leaving it
+        // stuck on "Running".
+        params.ctx.onXmlComplete(
+          `<dyad-mcp-tool-result server="${escapeXmlAttr(def.serverName)}" tool="${escapeXmlAttr(def.toolName)}" call-id="${escapeXmlAttr(callId)}" is-error="true">\n${escapeXmlContent(safeErrorMessage)}\n</dyad-mcp-tool-result>`,
+        );
+        params.ctx.onXmlComplete(
+          `<dyad-output type="error" message="MCP tool '${escapeXmlAttr(def.toolKey)}' failed: ${escapeXmlAttr(safeErrorMessage)}">${escapeXmlContent(safeErrorDetails)}</dyad-output>`,
+        );
+        throw error;
+      }
+    };
+  }
+
+  return map;
+}
+
+/**
+ * Build the full TypeScript declaration block describing all MCP tools
+ * exposed inside the sandbox. Injected into the `execute` tool description.
+ * Returns an empty string when `defs` is empty; callers should skip
+ * emitting the MCP section entirely in that case.
+ */
+export function buildMcpTypeDefsBlock(defs: McpToolDef[]): string {
+  if (defs.length === 0) {
+    return "";
+  }
+
+  const byServer = new Map<string, McpToolDef[]>();
+  for (const d of defs) {
+    const list = byServer.get(d.serverName) ?? [];
+    list.push(d);
+    byServer.set(d.serverName, list);
+  }
+
+  const sections: string[] = [MCP_RESULT_TYPE, ""];
+  for (const [serverName, list] of byServer) {
+    sections.push(`// ---- Server: ${serverName} ----`);
+    for (const def of list) {
+      const argsType = jsonSchemaToTs(def.inputSchema, 0);
+      if (def.description) {
+        const oneLine = def.description.replace(/\s+/g, " ").trim();
+        sections.push(`/** ${oneLine.replace(/\*\//g, "*\\/")} */`);
+      }
+      sections.push(
+        `declare function ${def.jsName}(args: ${argsType}): Promise<McpResult>;`,
+      );
+      sections.push("");
+    }
+  }
+
+  return sections.join("\n");
+}
+
+// The sandbox exposes MCP tools in one of two ways:
+// - inline: every tool's full declaration is listed in the description.
+// - search: only tool names are listed, and the model fetches schemas on
+//   demand via search_mcp_tools / get_mcp_tool_schema.
+// Search is used when inlining every declaration would exceed this many
+// estimated tokens; otherwise the tools are inlined.
+export const MCP_INLINE_TOKEN_THRESHOLD = 20_000;
+
+// Overrides the threshold for tests. 0 forces search on any catalog; a large
+// value forces inline. Invalid values fall back to the default.
+export function getMcpInlineTokenThreshold(): number {
+  const raw = process.env.DYAD_MCP_INLINE_TOKEN_THRESHOLD;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return MCP_INLINE_TOKEN_THRESHOLD;
+}
+
+// Estimated tokens (chars/4) of inlining every tool's full declaration.
+export function estimateMcpInlineTokens(defs: McpToolDef[]): number {
+  return Math.ceil(buildMcpTypeDefsBlock(defs).length / 4);
+}
+
+/**
+ * Build a names-only inventory of every MCP tool, grouped by server. Injected
+ * into the search-mode `execute_sandbox_script` description so the model sees
+ * which tools exist without paying for their descriptions or schemas. The
+ * model then pulls a tool's full signature with `get_mcp_tool_schema` (or
+ * finds one via `search_mcp_tools`). Names are the sandbox `jsName` (what the
+ * model actually calls). Returns "" when `defs` is empty.
+ */
+export function buildMcpToolNameInventory(defs: McpToolDef[]): string {
+  if (defs.length === 0) {
+    return "";
+  }
+
+  const byServer = new Map<string, McpToolDef[]>();
+  for (const d of defs) {
+    const list = byServer.get(d.serverName) ?? [];
+    list.push(d);
+    byServer.set(d.serverName, list);
+  }
+
+  const sections: string[] = [];
+  for (const [serverName, list] of byServer) {
+    sections.push(`// ${serverName}`);
+    for (const def of list) {
+      sections.push(`- ${def.jsName}`);
+    }
+  }
+
+  return sections.join("\n");
+}
+
+/**
+ * Resolve caller-supplied tool names to defs. Accepts either the sandbox
+ * `jsName` (unique, what the inventory lists) or the raw MCP `toolName` (not
+ * unique: two servers can expose the same `toolName`). A jsName resolves to
+ * exactly one def; a raw toolName resolves to every def that shares it, so an
+ * ambiguous name returns all candidates rather than silently picking one.
+ * Names matching nothing land in `missing`. Order follows the requested names;
+ * duplicate defs are collapsed by jsName.
+ */
+export function resolveMcpToolDefs(
+  defs: McpToolDef[],
+  names: string[],
+): { found: McpToolDef[]; missing: string[] } {
+  const byJsName = new Map(defs.map((d) => [d.jsName, d]));
+  const byToolName = new Map<string, McpToolDef[]>();
+  for (const d of defs) {
+    const list = byToolName.get(d.toolName) ?? [];
+    list.push(d);
+    byToolName.set(d.toolName, list);
+  }
+  const found: McpToolDef[] = [];
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const jsMatch = byJsName.get(name);
+    const matches = jsMatch ? [jsMatch] : (byToolName.get(name) ?? []);
+    if (matches.length === 0) {
+      missing.push(name);
+      continue;
+    }
+    for (const def of matches) {
+      if (seen.has(def.jsName)) continue;
+      seen.add(def.jsName);
+      found.push(def);
+    }
+  }
+  return { found, missing };
+}

@@ -1,0 +1,7 @@
+- button "Restore to this point"
+- paragraph: "[dump]"
+- paragraph: "[[dyad-dump-path=*]]"
+- button "Copy"
+- text: "[[Version 2: files changed]]"
+- button "Undo"
+- button "Retry"

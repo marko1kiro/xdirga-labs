@@ -1,0 +1,619 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+
+import { setDatabaseForTesting } from "@/db";
+import { apps, chats, messages } from "@/db/schema";
+import { SMALL_MODEL_NAME } from "@/ipc/shared/language_model_constants";
+import { createInMemoryTestDb, type TestDb } from "@/testing/test_db";
+
+const {
+  mockSafeSend,
+  mockStorePreCompactionMessages,
+  mockStreamText,
+  mockGetModelClient,
+  settingsState,
+} = vi.hoisted(() => ({
+  mockSafeSend: vi.fn(),
+  mockStorePreCompactionMessages: vi.fn(
+    async () => ".dyad/chats/1/compaction-test.md",
+  ),
+  mockStreamText: vi.fn(),
+  mockGetModelClient: vi.fn(async () => ({
+    modelClient: {
+      model: {},
+      builtinProviderId: "test-provider",
+    },
+  })),
+  settingsState: {
+    current: {
+      selectedModel: { provider: "anthropic", name: "test-model" },
+    } as Record<string, unknown>,
+  },
+}));
+
+vi.mock("ai", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("ai")>();
+  return { ...actual, streamText: mockStreamText };
+});
+
+vi.mock("@/main/settings", () => ({
+  readSettings: () => settingsState.current,
+}));
+
+vi.mock("@/ipc/utils/get_model_client", () => ({
+  getModelClient: mockGetModelClient,
+}));
+
+// Keep the pinned model's metadata deterministic without a remote catalog.
+vi.mock("@/ipc/utils/findLanguageModel", () => ({
+  findLanguageModel: async (model: { name: string }) =>
+    model.name === SMALL_MODEL_NAME
+      ? {
+          effortSettings: {
+            defaultEffortLevel: "high",
+            possibleEffortLevels: ["medium", "high"],
+          },
+        }
+      : undefined,
+}));
+
+vi.mock("@/ipc/utils/provider_options", () => ({
+  DYAD_INTERNAL_REQUEST_ID_HEADER: "x-dyad-request-id",
+  getAiHeaders: () => ({}),
+  getProviderOptions: () => ({}),
+}));
+
+vi.mock("@/ipc/utils/safe_sender", () => ({
+  safeSend: mockSafeSend,
+}));
+
+vi.mock("@/ipc/utils/stream_text_utils", () => ({
+  cancelOrphanedBaseStream: vi.fn(),
+  fastTextOutput: () => undefined,
+}));
+
+vi.mock("./compaction_storage", () => ({
+  formatAsTranscript: () => "test transcript",
+  storePreCompactionMessages: mockStorePreCompactionMessages,
+}));
+
+import { performCompaction } from "./compaction_handler";
+import { buildCompactionBlock } from "./compaction_utils";
+
+function textStream(chunks: string[]): AsyncIterable<string> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) {
+        yield chunk;
+      }
+    },
+  };
+}
+
+describe("performCompaction", () => {
+  let testDb: TestDb;
+  let chatId: number;
+
+  beforeEach(() => {
+    testDb = createInMemoryTestDb();
+    setDatabaseForTesting(testDb);
+
+    const app = testDb
+      .insert(apps)
+      .values({ name: "Test app", path: "test-app" })
+      .returning()
+      .get();
+    const chat = testDb
+      .insert(chats)
+      .values({ appId: app.id, pendingCompaction: true })
+      .returning()
+      .get();
+    chatId = chat.id;
+    testDb
+      .insert(messages)
+      .values([
+        { chatId, role: "user", content: "Original question" },
+        { chatId, role: "assistant", content: "Original answer" },
+      ])
+      .run();
+
+    mockStreamText.mockReset();
+    mockSafeSend.mockClear();
+    mockStorePreCompactionMessages.mockClear();
+    mockGetModelClient.mockClear();
+    settingsState.current = {
+      selectedModel: { provider: "anthropic", name: "test-model" },
+      providerSettings: {},
+    };
+  });
+
+  afterEach(() => {
+    setDatabaseForTesting(null);
+    testDb.$client.close();
+  });
+
+  const loadChat = () =>
+    testDb.query.chats.findFirst({ where: eq(chats.id, chatId) });
+
+  const loadSummaryMessages = () =>
+    testDb.query.messages
+      .findMany({
+        where: eq(messages.chatId, chatId),
+      })
+      .then((rows) => rows.filter((message) => message.isCompactionSummary));
+
+  it.each(["", "  \n  ", "Summary with <xml> & details"])(
+    "persists the canonical inline block for summary %j",
+    async (summary) => {
+      mockStreamText.mockReturnValue({ textStream: textStream([summary]) });
+      const result = await performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "request-id",
+        undefined,
+        { createdAtStrategy: "now" },
+      );
+      expect(result.success).toBe(true);
+      const summaries = await loadSummaryMessages();
+      expect(summaries).toHaveLength(1);
+      expect(
+        summaries[0].content.split(buildCompactionBlock(summary)),
+      ).toHaveLength(2);
+      if (!summary.trim())
+        expect(summaries[0].content).toContain("Conversation compacted.");
+      else expect(summaries[0].content).toContain("&lt;xml&gt; &amp; details");
+    },
+  );
+
+  it("aborts mid-summary without persisting or broadcasting and retains the pending mark", async () => {
+    const controller = new AbortController();
+    mockStreamText.mockReturnValue({
+      textStream: textStream(["partial", "ignored"]),
+    });
+
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+      () => controller.abort(),
+      { abortSignal: controller.signal },
+    );
+
+    expect(result).toEqual({
+      success: false,
+      aborted: true,
+      error: "Compaction aborted",
+    });
+    expect(mockStreamText).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal }),
+    );
+    await expect(loadSummaryMessages()).resolves.toEqual([]);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: true,
+      compactedAt: null,
+      compactionBackupPath: null,
+    });
+    expect(mockSafeSend).not.toHaveBeenCalled();
+  });
+
+  it("bails immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+      undefined,
+      { abortSignal: controller.signal },
+    );
+
+    expect(result).toEqual({
+      success: false,
+      aborted: true,
+      error: "Compaction aborted",
+    });
+    expect(mockStreamText).not.toHaveBeenCalled();
+    expect(mockStorePreCompactionMessages).not.toHaveBeenCalled();
+    await expect(loadSummaryMessages()).resolves.toEqual([]);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: true,
+      compactedAt: null,
+      compactionBackupPath: null,
+    });
+    expect(mockSafeSend).not.toHaveBeenCalled();
+  });
+
+  it("preserves the normal compaction path", async () => {
+    const controller = new AbortController();
+    mockStreamText.mockReturnValue({
+      textStream: textStream(["Complete summary"]),
+    });
+
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+      undefined,
+      { abortSignal: controller.signal },
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      summary: "Complete summary",
+      backupPath: ".dyad/chats/1/compaction-test.md",
+    });
+    await expect(loadSummaryMessages()).resolves.toHaveLength(1);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: false,
+      compactionBackupPath: ".dyad/chats/1/compaction-test.md",
+    });
+    expect(mockSafeSend).toHaveBeenCalledWith(
+      expect.anything(),
+      "chat:compaction:complete",
+      {
+        chatId,
+        backupPath: ".dyad/chats/1/compaction-test.md",
+      },
+    );
+  });
+
+  it("summarizes with the user's selected model for non-Pro users", async () => {
+    mockStreamText.mockReturnValue({
+      textStream: textStream(["Complete summary"]),
+    });
+
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+    );
+
+    expect(result).toMatchObject({ success: true });
+    expect(mockGetModelClient).toHaveBeenCalledWith(
+      {
+        provider: "anthropic",
+        name: "test-model",
+        effortLevel: "medium",
+      },
+      {
+        selectedChatMode: "local-agent",
+        providerSettings: {},
+        selectedModel: {
+          provider: "anthropic",
+          name: "test-model",
+          effortLevel: "medium",
+        },
+      },
+      {
+        provider: "anthropic",
+        name: "test-model",
+        effortLevel: "medium",
+      },
+    );
+  });
+
+  it("uses engine-backed Luna for Pro BYO compaction without an OpenAI key", async () => {
+    const accepted = {
+      selectedModel: { provider: "anthropic", name: "test-model" },
+      enableDyadPro: true,
+      proModelUsage: "api-key",
+      selectedChatMode: "local-agent",
+      providerSettings: {
+        auto: { apiKey: { value: "dyad-key" } },
+        anthropic: { apiKey: { value: "anthropic-key" } },
+      },
+    } as unknown as import("@/lib/schemas").UserSettings;
+    mockStreamText.mockReturnValue({ textStream: textStream(["Summary"]) });
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+      undefined,
+      { settingsOverride: accepted },
+    );
+    expect(result.success).toBe(true);
+    expect(mockGetModelClient).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", name: SMALL_MODEL_NAME }),
+      expect.objectContaining({
+        providerSettings: accepted.providerSettings,
+        proModelUsage: "pro",
+      }),
+      expect.objectContaining({ provider: "openai", name: SMALL_MODEL_NAME }),
+    );
+  });
+
+  it("pins the benchmarked compaction model for Dyad Pro users", async () => {
+    settingsState.current = {
+      selectedModel: { provider: "anthropic", name: "test-model" },
+      enableDyadPro: true,
+      providerSettings: { auto: { apiKey: { value: "dyad-pro-key" } } },
+    };
+    mockStreamText.mockReturnValue({
+      textStream: textStream(["Complete summary"]),
+    });
+
+    const result = await performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "request-id",
+    );
+
+    expect(result).toMatchObject({ success: true });
+    expect(mockGetModelClient).toHaveBeenCalledWith(
+      {
+        provider: "openai",
+        name: SMALL_MODEL_NAME,
+        effortLevel: "high",
+      },
+      {
+        enableDyadPro: true,
+        selectedChatMode: "local-agent",
+        providerSettings: { auto: { apiKey: { value: "dyad-pro-key" } } },
+        selectedModel: {
+          provider: "openai",
+          name: SMALL_MODEL_NAME,
+          effortLevel: "high",
+        },
+      },
+      {
+        provider: "openai",
+        name: SMALL_MODEL_NAME,
+        effortLevel: "high",
+      },
+    );
+  });
+
+  it.each(["build", "ask", "plan", "local-agent"] as const)(
+    "uses the accepted %s mode and account during compaction",
+    async (selectedChatMode) => {
+      const accepted = {
+        selectedModel: { provider: "openai", name: "gpt-5" },
+        enableDyadPro: true,
+        selectedChatMode,
+        providerSettings: { auto: { apiKey: { value: "accepted-key" } } },
+      } as unknown as import("@/lib/schemas").UserSettings;
+      settingsState.current = {
+        ...accepted,
+        selectedChatMode:
+          selectedChatMode === "local-agent" ? "build" : "local-agent",
+        providerSettings: { auto: { apiKey: { value: "changed-key" } } },
+      };
+      mockStreamText.mockReturnValue({ textStream: textStream(["Summary"]) });
+      const result = await performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "request-id",
+        undefined,
+        { settingsOverride: accepted },
+      );
+      expect(result.success).toBe(true);
+      expect(mockGetModelClient).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({
+          selectedChatMode,
+          providerSettings: accepted.providerSettings,
+        }),
+        expect.any(Object),
+      );
+    },
+  );
+
+  it.each(["pro", "subscription"] as const)(
+    "discards a saved %s connection after Pro is disabled",
+    async (connection) => {
+      testDb
+        .update(chats)
+        .set({
+          modelSelection: {
+            provider: "openai",
+            name: "gpt-4o",
+            effortLevel: "medium",
+            connection,
+          },
+        })
+        .where(eq(chats.id, chatId))
+        .run();
+      settingsState.current = {
+        enableDyadPro: false,
+        providerSettings: { openai: { apiKey: { value: "configured-key" } } },
+      };
+      mockStreamText.mockReturnValue({ textStream: textStream(["Summary"]) });
+
+      const result = await performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "request-id",
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockGetModelClient).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "openai", name: "gpt-4o" }),
+        expect.objectContaining({ enableDyadPro: false }),
+        expect.not.objectContaining({ connection: expect.anything() }),
+      );
+      expect((await loadChat())?.modelSelection?.connection).toBe(connection);
+    },
+  );
+
+  it("single-flights concurrent compaction attempts for one chat", async () => {
+    let releaseSummary!: () => void;
+    const summaryGate = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    mockStreamText.mockReturnValue({
+      textStream: {
+        async *[Symbol.asyncIterator]() {
+          await summaryGate;
+          yield "Only summary";
+        },
+      },
+    });
+
+    const winner = performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "winner-request",
+    );
+    await vi.waitFor(() => expect(mockStreamText).toHaveBeenCalledOnce());
+
+    await expect(
+      performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "loser-request",
+      ),
+    ).resolves.toEqual({ success: false, skipped: true });
+
+    releaseSummary();
+    await expect(winner).resolves.toMatchObject({
+      success: true,
+      summary: "Only summary",
+    });
+    await expect(loadSummaryMessages()).resolves.toHaveLength(1);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: false,
+    });
+    expect(mockSafeSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a third attempt after the winner aborts and retains the pending mark", async () => {
+    const controller = new AbortController();
+    let releaseAbortedSummary!: () => void;
+    const abortedSummaryGate = new Promise<void>((resolve) => {
+      releaseAbortedSummary = resolve;
+    });
+    mockStreamText.mockReturnValueOnce({
+      textStream: {
+        async *[Symbol.asyncIterator]() {
+          yield "partial";
+          await abortedSummaryGate;
+          yield "ignored";
+        },
+      },
+    });
+
+    const winner = performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "winner-request",
+      () => controller.abort(),
+      { abortSignal: controller.signal },
+    );
+    await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+
+    await expect(
+      performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "loser-request",
+      ),
+    ).resolves.toEqual({ success: false, skipped: true });
+
+    releaseAbortedSummary();
+    await expect(winner).resolves.toEqual({
+      success: false,
+      aborted: true,
+      error: "Compaction aborted",
+    });
+    await expect(loadSummaryMessages()).resolves.toEqual([]);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: true,
+    });
+
+    mockStreamText.mockReturnValueOnce({
+      textStream: textStream(["Retried summary"]),
+    });
+    await expect(
+      performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "third-request",
+      ),
+    ).resolves.toMatchObject({
+      success: true,
+      summary: "Retried summary",
+    });
+    await expect(loadSummaryMessages()).resolves.toHaveLength(1);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: false,
+    });
+    expect(mockSafeSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a third attempt after the winner fails and retains the pending mark", async () => {
+    let rejectSummary!: () => void;
+    const summaryFailureGate = new Promise<void>((resolve) => {
+      rejectSummary = resolve;
+    });
+    mockStreamText.mockReturnValueOnce({
+      textStream: {
+        async *[Symbol.asyncIterator]() {
+          await summaryFailureGate;
+          yield await Promise.reject(new Error("provider failed"));
+        },
+      },
+    });
+
+    const winner = performCompaction(
+      { sender: {} } as never,
+      chatId,
+      "/tmp/test-app",
+      "winner-request",
+    );
+    await vi.waitFor(() => expect(mockStreamText).toHaveBeenCalledOnce());
+
+    await expect(
+      performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "loser-request",
+      ),
+    ).resolves.toEqual({ success: false, skipped: true });
+
+    rejectSummary();
+    await expect(winner).resolves.toEqual({
+      success: false,
+      error: "provider failed",
+    });
+    await expect(loadSummaryMessages()).resolves.toEqual([]);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: true,
+    });
+
+    mockStreamText.mockReturnValueOnce({
+      textStream: textStream(["Retried summary"]),
+    });
+    await expect(
+      performCompaction(
+        { sender: {} } as never,
+        chatId,
+        "/tmp/test-app",
+        "third-request",
+      ),
+    ).resolves.toMatchObject({
+      success: true,
+      summary: "Retried summary",
+    });
+    await expect(loadSummaryMessages()).resolves.toHaveLength(1);
+    await expect(loadChat()).resolves.toMatchObject({
+      pendingCompaction: false,
+    });
+    expect(mockSafeSend).toHaveBeenCalledTimes(1);
+  });
+});

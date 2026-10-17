@@ -1,0 +1,350 @@
+import { describe, expect, it } from "vitest";
+import {
+  assertAllCommandsProducible,
+  assertAllStatesReachable,
+  assertReferenceStability,
+  exploreReachableStates,
+  ignoreReasonOf,
+} from "../state_machines/testing";
+import type { UserInputCommand } from "./commands";
+import type {
+  UserInputDescriptor,
+  UserInputEvent,
+  UserInputState,
+} from "./state";
+import { SKIP_DATABASE_INTEGRATION_PROMPT, transition } from "./transition";
+
+const descriptor: UserInputDescriptor = {
+  kind: "mcp-consent",
+  requestId: "mcp-consent:1",
+  chatId: 10,
+  deadlineAt: 300_000,
+  serverId: 2,
+  serverName: "server",
+  toolName: "read",
+  classifier: "racing",
+};
+const request: UserInputEvent = {
+  type: "requested",
+  descriptor,
+  deadlineMs: 300_000,
+};
+const followUpDescriptor: UserInputDescriptor = {
+  kind: "integration",
+  requestId: "integration:1",
+  chatId: 11,
+  deadlineAt: 1_800_000,
+  provider: "supabase",
+  classifier: "none",
+  followUpPrompt: "continue",
+};
+const followUpRequest: UserInputEvent = {
+  type: "requested",
+  descriptor: followUpDescriptor,
+  deadlineMs: 1_800_000,
+};
+const raceEvents: UserInputEvent[] = [
+  {
+    type: "human-decided",
+    requestId: descriptor.requestId,
+    response: { kind: "mcp-consent", decision: "accept-once" },
+  },
+  {
+    type: "classifier-decided",
+    requestId: descriptor.requestId,
+    approved: true,
+  },
+  { type: "timed-out", requestId: descriptor.requestId },
+  { type: "chat-swept", chatId: descriptor.chatId },
+];
+const EVENTS: UserInputEvent[] = [
+  request,
+  followUpRequest,
+  ...raceEvents,
+  {
+    type: "classifier-decided",
+    requestId: descriptor.requestId,
+    approved: false,
+  },
+  { type: "stream-finished", chatId: descriptor.chatId },
+  { type: "follow-up-dispatched", requestId: descriptor.requestId },
+  { type: "follow-up-rejected", requestId: descriptor.requestId },
+  {
+    type: "human-decided",
+    requestId: followUpDescriptor.requestId,
+    response: {
+      kind: "integration",
+      provider: "supabase",
+      completed: true,
+    },
+  },
+  { type: "stream-finished", chatId: followUpDescriptor.chatId },
+  {
+    type: "follow-up-dispatched",
+    requestId: followUpDescriptor.requestId,
+  },
+  {
+    type: "human-decided",
+    requestId: descriptor.requestId,
+    response: { kind: "questionnaire", answers: null },
+  },
+  {
+    type: "human-decided",
+    requestId: descriptor.requestId,
+    response: { kind: "mcp-consent", decision: "accept-always" },
+  },
+];
+const STATE_KINDS = [
+  "idle",
+  "awaiting",
+  "armed",
+  "due",
+  "settled",
+] as const satisfies readonly UserInputState["status"][];
+const COMMAND_KINDS = [
+  "broadcast-requested",
+  "broadcast-armed",
+  "broadcast-classified",
+  "broadcast-settled",
+  "broadcast-follow-up-due",
+  "resolve-park",
+  "persist-always",
+  "schedule-deadline",
+  "cancel-deadline",
+] as const satisfies readonly UserInputCommand["type"][];
+
+function permutations<T>(values: readonly T[]): T[][] {
+  if (values.length <= 1) return [values.slice()];
+  return values.flatMap((value, index) =>
+    permutations(values.filter((_, candidate) => candidate !== index)).map(
+      (rest) => [value, ...rest],
+    ),
+  );
+}
+
+describe("user-input transition", () => {
+  it("is total and reference-stable over every reachable state and event", () => {
+    const events = EVENTS;
+    const options = {
+      initialState: { status: "idle" } as UserInputState,
+      events,
+      transition,
+      stateKey: JSON.stringify,
+    };
+    assertAllStatesReachable({
+      ...options,
+      inventory: STATE_KINDS,
+      stateKind: (state) => state.status,
+    });
+    assertAllCommandsProducible({
+      ...options,
+      inventory: COMMAND_KINDS,
+      commandKind: (command) => command.type,
+    });
+    const graph = exploreReachableStates({
+      initialState: { status: "idle" } as UserInputState,
+      events,
+      transition,
+      stateKey: JSON.stringify,
+    });
+    const states = graph.nodes.map(({ state }) => state);
+    expect(states.some((state) => state.status === "armed")).toBe(true);
+    expect(states.some((state) => state.status === "due")).toBe(true);
+
+    for (const state of states) {
+      for (const event of events) {
+        const result = transition(state, event);
+        expect(result).toBeDefined();
+        assertReferenceStability(
+          state,
+          result,
+          (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        );
+      }
+    }
+
+    const awaiting = transition({ status: "idle" }, request).state;
+    expect(
+      ignoreReasonOf(
+        transition(awaiting, {
+          type: "human-decided",
+          requestId: descriptor.requestId,
+          response: { kind: "questionnaire", answers: null },
+        }),
+      ),
+    ).toBe("response-kind-mismatch");
+  });
+
+  it("makes every terminal ordering first-applied-wins", () => {
+    for (const ordering of permutations(raceEvents)) {
+      let state = transition({ status: "idle" }, request).state;
+      const first = transition(state, ordering[0]);
+      expect(ignoreReasonOf(first)).toBeUndefined();
+      state = first.state;
+      expect(state.status).toBe("settled");
+
+      for (const loser of ordering.slice(1)) {
+        const result = transition(state, loser);
+        expect(ignoreReasonOf(result)).toBe("already-settled");
+        expect(result.state).toBe(state);
+      }
+    }
+  });
+
+  it("arms an exact visible follow-up when database setup is skipped", () => {
+    const awaiting = transition({ status: "idle" }, followUpRequest).state;
+    const skippedResponse = {
+      kind: "integration" as const,
+      provider: null,
+      completed: false,
+    };
+
+    const skipped = transition(awaiting, {
+      type: "human-decided",
+      requestId: followUpDescriptor.requestId,
+      response: skippedResponse,
+    });
+
+    expect(skipped.kind).toBe("applied");
+    if (skipped.kind !== "applied") throw new Error("Expected skip to apply");
+    expect(skipped.state).toMatchObject({
+      status: "armed",
+      followUpPrompt: SKIP_DATABASE_INTEGRATION_PROMPT,
+    });
+    expect(skipped.commands).toContainEqual({
+      type: "broadcast-armed",
+      descriptor: followUpDescriptor,
+      followUpPrompt: SKIP_DATABASE_INTEGRATION_PROMPT,
+    });
+    expect(skipped.commands).toContainEqual({
+      type: "resolve-park",
+      requestId: followUpDescriptor.requestId,
+      value: skippedResponse,
+    });
+
+    const due = transition(skipped.state, {
+      type: "stream-finished",
+      chatId: followUpDescriptor.chatId,
+    });
+    expect(due.kind).toBe("applied");
+    if (due.kind !== "applied") throw new Error("Expected follow-up to arm");
+    expect(due.state).toMatchObject({
+      status: "due",
+      followUpPrompt: SKIP_DATABASE_INTEGRATION_PROMPT,
+    });
+    expect(due.commands).toContainEqual({
+      type: "broadcast-follow-up-due",
+      requestId: followUpDescriptor.requestId,
+      chatId: followUpDescriptor.chatId,
+      prompt: SKIP_DATABASE_INTEGRATION_PROMPT,
+    });
+  });
+
+  it("arms a plugin suggestion's own follow-up on connect and settles on decline", () => {
+    const suggestion: UserInputDescriptor = {
+      kind: "plugin-suggestion",
+      requestId: "plugin-suggestion:1",
+      chatId: 12,
+      deadlineAt: 1_800_000,
+      slug: "vercel",
+      serverName: "Vercel",
+      needsOAuth: true,
+      reason: "Read the build logs.",
+      classifier: "none",
+      followUpPrompt: "Continue. I have connected the Vercel plugin.",
+    };
+    const awaiting = transition(
+      { status: "idle" },
+      { type: "requested", descriptor: suggestion, deadlineMs: 1_800_000 },
+    ).state;
+
+    const connected = transition(awaiting, {
+      type: "human-decided",
+      requestId: suggestion.requestId,
+      response: { kind: "plugin-suggestion", outcome: "connected" },
+    });
+    expect(connected.kind).toBe("applied");
+    if (connected.kind !== "applied") throw new Error("Expected arm");
+    expect(connected.state).toMatchObject({
+      status: "armed",
+      followUpPrompt: suggestion.followUpPrompt,
+    });
+    expect(connected.commands).toContainEqual({
+      type: "broadcast-armed",
+      descriptor: suggestion,
+      followUpPrompt: suggestion.followUpPrompt,
+    });
+    // Arming must also release the parked tool, or the agent stays blocked.
+    expect(connected.commands).toContainEqual({
+      type: "resolve-park",
+      requestId: suggestion.requestId,
+      value: { kind: "plugin-suggestion", outcome: "connected" },
+    });
+    const due = transition(connected.state, {
+      type: "stream-finished",
+      chatId: suggestion.chatId,
+    });
+    expect(due.kind).toBe("applied");
+    if (due.kind !== "applied") throw new Error("Expected due");
+    expect(due.commands).toContainEqual({
+      type: "broadcast-follow-up-due",
+      requestId: suggestion.requestId,
+      chatId: suggestion.chatId,
+      prompt: suggestion.followUpPrompt,
+    });
+
+    const declined = transition(awaiting, {
+      type: "human-decided",
+      requestId: suggestion.requestId,
+      response: { kind: "plugin-suggestion", outcome: "declined" },
+    });
+    expect(declined.kind).toBe("applied");
+    if (declined.kind !== "applied") throw new Error("Expected settle");
+    expect(declined.state).toMatchObject({
+      status: "settled",
+      outcome: "human",
+    });
+    expect(declined.commands).toContainEqual({
+      type: "resolve-park",
+      requestId: suggestion.requestId,
+      value: { kind: "plugin-suggestion", outcome: "declined" },
+    });
+
+    // Opting out for good also settles in place; main persists the choice.
+    const never = transition(awaiting, {
+      type: "human-decided",
+      requestId: suggestion.requestId,
+      response: { kind: "plugin-suggestion", outcome: "never" },
+    });
+    expect(never.state).toMatchObject({ status: "settled", outcome: "human" });
+  });
+});
+
+it("rejects persistent consent for a turn-scoped approval", () => {
+  const scoped: UserInputDescriptor = {
+    kind: "agent-consent",
+    requestId: "scoped:1",
+    chatId: 1,
+    deadlineAt: 300000,
+    toolName: "Claude Code: Edit",
+    classifier: "none",
+    allowAlways: false,
+  };
+  const state = transition(
+    { status: "idle" },
+    { type: "requested", descriptor: scoped, deadlineMs: 300000 },
+  ).state;
+  const always = transition(state, {
+    type: "human-decided",
+    requestId: scoped.requestId,
+    response: { kind: "agent-consent", decision: "accept-always" },
+  });
+  expect(always.state).toBe(state);
+  expect(ignoreReasonOf(always)).toBe("response-kind-mismatch");
+  const once = transition(state, {
+    type: "human-decided",
+    requestId: scoped.requestId,
+    response: { kind: "agent-consent", decision: "accept-once" },
+  });
+  expect(once.state.status).toBe("settled");
+});

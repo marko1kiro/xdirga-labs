@@ -1,0 +1,510 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => {
+  const where = vi.fn().mockResolvedValue(undefined);
+  const set = vi.fn(() => ({ where }));
+  const update = vi.fn(() => ({ set }));
+  return {
+    db: { update },
+    update,
+    set,
+    where,
+    generateCookieSecret: vi.fn(() => "generated".padEnd(64, "0")),
+    readEnvVarsOrEmpty: vi.fn(),
+    getNeonClient: vi.fn(),
+  };
+});
+
+vi.mock("@/db", () => ({
+  db: mocks.db,
+}));
+
+vi.mock("@/db/schema", () => ({
+  apps: { id: "id" },
+}));
+
+vi.mock("drizzle-orm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("drizzle-orm")>();
+  return {
+    ...actual,
+    eq: vi.fn((a, b) => ({ a, b })),
+  };
+});
+
+vi.mock("@/ipc/utils/app_env_var_utils", () => ({
+  generateCookieSecret: mocks.generateCookieSecret,
+  readEnvVarsOrEmpty: mocks.readEnvVarsOrEmpty,
+  updateNeonEnvVars: vi.fn(),
+}));
+
+vi.mock("@/neon_admin/neon_management_client", () => ({
+  getNeonClient: mocks.getNeonClient,
+}));
+
+vi.mock("@/neon_admin/neon_context", () => ({
+  getConnectionUri: vi.fn(),
+}));
+
+vi.mock("electron-log", () => ({
+  default: {
+    scope: () => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+    }),
+  },
+}));
+
+import {
+  ensureNeonAuthTrustedOrigin,
+  getOrCreateNeonAuthCookieSecret,
+  syncActiveNeonAuthCookieSecretFromEnv,
+} from "@/ipc/utils/neon_utils";
+
+type AppRow = {
+  id: number;
+  path: string;
+  neonProjectId: string | null;
+  neonDevelopmentBranchId: string | null;
+  neonPreviewBranchId: string | null;
+  neonActiveBranchId: string | null;
+  neonProductionAuthCookieSecret: string | null;
+  neonDevelopmentAuthCookieSecret: string | null;
+};
+
+function makeApp(overrides: Partial<AppRow> = {}): AppRow {
+  return {
+    id: 1,
+    path: "my-app",
+    neonProjectId: "proj-1",
+    neonDevelopmentBranchId: "br-dev",
+    neonPreviewBranchId: "br-preview",
+    neonActiveBranchId: "br-dev",
+    neonProductionAuthCookieSecret: null,
+    neonDevelopmentAuthCookieSecret: null,
+    ...overrides,
+  };
+}
+
+describe("getOrCreateNeonAuthCookieSecret", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the persisted production secret without DB write or env read", async () => {
+    const appData = makeApp({
+      neonProductionAuthCookieSecret: "persisted-prod",
+      neonActiveBranchId: "br-prod",
+    });
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "production",
+    });
+
+    expect(result).toBe("persisted-prod");
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+    expect(mocks.generateCookieSecret).not.toHaveBeenCalled();
+  });
+
+  it("returns the persisted development secret without DB write or env read", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: "persisted-dev",
+    });
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBe("persisted-dev");
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+  });
+
+  it("adopts the existing .env.local secret when querying the active dev branch and persists it", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: null,
+      neonActiveBranchId: "br-dev",
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "NEON_AUTH_COOKIE_SECRET", value: "adopted-secret" },
+    ]);
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBe("adopted-secret");
+    expect(mocks.readEnvVarsOrEmpty).toHaveBeenCalledWith({
+      appPath: "my-app",
+    });
+    expect(mocks.generateCookieSecret).not.toHaveBeenCalled();
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonDevelopmentAuthCookieSecret: "adopted-secret",
+    });
+  });
+
+  it("does NOT read .env.local when querying a branch that is not currently active", async () => {
+    const appData = makeApp({
+      neonProductionAuthCookieSecret: null,
+      // dev is active; querying production
+      neonActiveBranchId: "br-dev",
+    });
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "production",
+    });
+
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+    expect(mocks.generateCookieSecret).toHaveBeenCalledOnce();
+    expect(result).toBe("generated".padEnd(64, "0"));
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonProductionAuthCookieSecret: "generated".padEnd(64, "0"),
+    });
+  });
+
+  it("generates fresh when the active branch's env file has no NEON_AUTH_COOKIE_SECRET", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: null,
+      neonActiveBranchId: "br-dev",
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "DATABASE_URL", value: "postgresql://..." },
+    ]);
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBe("generated".padEnd(64, "0"));
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonDevelopmentAuthCookieSecret: "generated".padEnd(64, "0"),
+    });
+  });
+
+  it("adopts the development env secret when neonActiveBranchId is null but development is the implicit active branch", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: null,
+      neonActiveBranchId: null,
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "NEON_AUTH_COOKIE_SECRET", value: "legacy-dev-secret" },
+    ]);
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBe("legacy-dev-secret");
+    expect(mocks.readEnvVarsOrEmpty).toHaveBeenCalledWith({
+      appPath: "my-app",
+    });
+    expect(mocks.generateCookieSecret).not.toHaveBeenCalled();
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonDevelopmentAuthCookieSecret: "legacy-dev-secret",
+    });
+  });
+
+  it("generates fresh when neonActiveBranchId is null and there is no implicit development branch", async () => {
+    const appData = makeApp({
+      neonDevelopmentBranchId: null,
+      neonDevelopmentAuthCookieSecret: null,
+      neonActiveBranchId: null,
+    });
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+    expect(result).toBe("generated".padEnd(64, "0"));
+  });
+
+  it("classifies production as active when activeId is neither dev nor preview", async () => {
+    // active is the prod branch id (e.g. some neon default branch id)
+    const appData = makeApp({
+      neonProductionAuthCookieSecret: null,
+      neonActiveBranchId: "br-prod",
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "NEON_AUTH_COOKIE_SECRET", value: "adopted-prod" },
+    ]);
+
+    const result = await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "production",
+    });
+
+    expect(result).toBe("adopted-prod");
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonProductionAuthCookieSecret: "adopted-prod",
+    });
+  });
+
+  it("does not treat production as active when active branch is the preview branch", async () => {
+    const appData = makeApp({
+      neonProductionAuthCookieSecret: null,
+      neonActiveBranchId: "br-preview",
+    });
+
+    await getOrCreateNeonAuthCookieSecret({
+      appData: appData as any,
+      branchType: "production",
+    });
+
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+    expect(mocks.generateCookieSecret).toHaveBeenCalledOnce();
+  });
+});
+
+describe("syncActiveNeonAuthCookieSecretFromEnv", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("persists the active development branch's current env secret over a stale DB value", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: "stale-generated-secret",
+      neonActiveBranchId: "br-dev",
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "NEON_AUTH_COOKIE_SECRET", value: "actual-env-secret" },
+    ]);
+
+    const result = await syncActiveNeonAuthCookieSecretFromEnv({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBe("actual-env-secret");
+    expect(mocks.generateCookieSecret).not.toHaveBeenCalled();
+    expect(mocks.set).toHaveBeenCalledWith({
+      neonDevelopmentAuthCookieSecret: "actual-env-secret",
+    });
+  });
+
+  it("does not write when the requested branch type is not active", async () => {
+    const appData = makeApp({
+      neonProductionAuthCookieSecret: null,
+      neonActiveBranchId: "br-dev",
+    });
+
+    const result = await syncActiveNeonAuthCookieSecretFromEnv({
+      appData: appData as any,
+      branchType: "production",
+    });
+
+    expect(result).toBeUndefined();
+    expect(mocks.readEnvVarsOrEmpty).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("does not write when the active env file has no cookie secret", async () => {
+    const appData = makeApp({
+      neonDevelopmentAuthCookieSecret: null,
+      neonActiveBranchId: "br-dev",
+    });
+    mocks.readEnvVarsOrEmpty.mockResolvedValueOnce([
+      { key: "DATABASE_URL", value: "postgresql://..." },
+    ]);
+
+    const result = await syncActiveNeonAuthCookieSecretFromEnv({
+      appData: appData as any,
+      branchType: "development",
+    });
+
+    expect(result).toBeUndefined();
+    expect(mocks.set).not.toHaveBeenCalled();
+  });
+});
+
+describe("ensureNeonAuthTrustedOrigin", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("backs off and retries when Neon rate-limits the lookup", async () => {
+    // Running several specs back to back is exactly the burst that trips Neon's
+    // rate limit. Every other Neon call in this flow retries; an unretried
+    // clash here refused the entire run, including specs that never sign in.
+    const rateLimited = Object.assign(new Error("Too many requests"), {
+      response: { status: 429 },
+    });
+    const listBranchNeonAuthTrustedDomains = vi
+      .fn()
+      .mockRejectedValueOnce(rateLimited)
+      .mockResolvedValue({ data: { domains: [] } });
+    const addBranchNeonAuthTrustedDomain = vi
+      .fn()
+      .mockResolvedValue({ data: undefined });
+    mocks.getNeonClient.mockResolvedValue({
+      listBranchNeonAuthTrustedDomains,
+      addBranchNeonAuthTrustedDomain,
+    });
+
+    await expect(
+      ensureNeonAuthTrustedOrigin({
+        projectId: "proj-1",
+        branchId: "br-test",
+        origin: "http://127.0.0.1:52150",
+      }),
+    ).resolves.toBe("http://127.0.0.1:52150");
+    expect(listBranchNeonAuthTrustedDomains).toHaveBeenCalledTimes(2);
+  }, 30_000);
+
+  it("preserves an HTTP loopback origin exactly", async () => {
+    const listBranchNeonAuthTrustedDomains = vi.fn().mockResolvedValue({
+      data: { domains: [] },
+    });
+    const addBranchNeonAuthTrustedDomain = vi
+      .fn()
+      .mockResolvedValue({ data: undefined });
+    mocks.getNeonClient.mockResolvedValue({
+      listBranchNeonAuthTrustedDomains,
+      addBranchNeonAuthTrustedDomain,
+    });
+
+    const result = await ensureNeonAuthTrustedOrigin({
+      projectId: "proj-1",
+      branchId: "br-test",
+      origin: "http://127.0.0.1:35129/path",
+    });
+
+    expect(result).toBe("http://127.0.0.1:35129");
+    expect(addBranchNeonAuthTrustedDomain).toHaveBeenCalledWith(
+      "proj-1",
+      "br-test",
+      {
+        domain: "http://127.0.0.1:35129",
+        auth_provider: "better_auth",
+      },
+    );
+  });
+
+  it("does not add an origin that is already trusted", async () => {
+    const listBranchNeonAuthTrustedDomains = vi.fn().mockResolvedValue({
+      data: {
+        domains: [
+          {
+            domain: "http://127.0.0.1:35129",
+            auth_provider: "better_auth",
+          },
+        ],
+      },
+    });
+    const addBranchNeonAuthTrustedDomain = vi.fn();
+    mocks.getNeonClient.mockResolvedValue({
+      listBranchNeonAuthTrustedDomains,
+      addBranchNeonAuthTrustedDomain,
+    });
+
+    const result = await ensureNeonAuthTrustedOrigin({
+      projectId: "proj-1",
+      branchId: "br-test",
+      origin: "http://127.0.0.1:35129",
+    });
+
+    expect(result).toBeNull();
+    expect(addBranchNeonAuthTrustedDomain).not.toHaveBeenCalled();
+  });
+});
+
+describe("ensureNeonAuthTrustedDomain cancellation", () => {
+  it("preserves the conflict when the recovery listing has no data", async () => {
+    const { getNeonClient } =
+      await import("@/neon_admin/neon_management_client");
+    const { ensureNeonAuthTrustedDomain } = await import("./neon_utils");
+    const conflict = { response: { status: 409 } };
+    vi.mocked(getNeonClient).mockResolvedValue({
+      listBranchNeonAuthTrustedDomains: vi
+        .fn()
+        .mockResolvedValueOnce({ data: { domains: [] } })
+        .mockResolvedValueOnce({}),
+      addBranchNeonAuthTrustedDomain: vi.fn().mockRejectedValue(conflict),
+    } as any);
+    await expect(
+      ensureNeonAuthTrustedDomain({
+        projectId: "project",
+        branchId: "branch",
+        origin: "http://app-42.localhost:42142",
+      }),
+    ).rejects.toBe(conflict);
+  });
+  it("does not list or mutate domains after credentials arrive for a cancelled request", async () => {
+    const { getNeonClient } =
+      await import("@/neon_admin/neon_management_client");
+    const { ensureNeonAuthTrustedDomain } = await import("./neon_utils");
+    let provide!: (client: any) => void;
+    vi.mocked(getNeonClient).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          provide = resolve;
+        }),
+    );
+    const client = {
+      listBranchNeonAuthTrustedDomains: vi.fn(),
+      addBranchNeonAuthTrustedDomain: vi.fn(),
+    };
+    const controller = new AbortController();
+    const work = ensureNeonAuthTrustedDomain({
+      projectId: "project",
+      branchId: "branch",
+      origin: "http://app-42.localhost:42142",
+      signal: controller.signal,
+    });
+    controller.abort(new Error("Stopped"));
+    await expect(work).rejects.toThrow("Stopped");
+    provide(client);
+    await Promise.resolve();
+    expect(client.listBranchNeonAuthTrustedDomains).not.toHaveBeenCalled();
+    expect(client.addBranchNeonAuthTrustedDomain).not.toHaveBeenCalled();
+  });
+
+  it("keeps the exact HTTP origin and accepts a concurrent already-existing domain", async () => {
+    const { getNeonClient } =
+      await import("@/neon_admin/neon_management_client");
+    const { ensureNeonAuthTrustedDomain } = await import("./neon_utils");
+    const origin = "http://app-42.localhost:42999";
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { domains: [] } })
+      .mockResolvedValue({ data: { domains: [{ domain: origin }] } });
+    const add = vi.fn().mockRejectedValue({ response: { status: 409 } });
+    vi.mocked(getNeonClient).mockResolvedValue({
+      listBranchNeonAuthTrustedDomains: list,
+      addBranchNeonAuthTrustedDomain: add,
+    } as any);
+    const signal = new AbortController().signal;
+    await expect(
+      ensureNeonAuthTrustedDomain({
+        projectId: "project",
+        branchId: "branch",
+        origin,
+        signal,
+      }),
+    ).resolves.toBe(origin);
+    expect(add).toHaveBeenCalledWith(
+      "project",
+      "branch",
+      expect.objectContaining({ domain: origin }),
+      { signal },
+    );
+    await expect(
+      ensureNeonAuthTrustedDomain({
+        projectId: "project",
+        branchId: "branch",
+        origin,
+        signal,
+      }),
+    ).resolves.toBeNull();
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+});

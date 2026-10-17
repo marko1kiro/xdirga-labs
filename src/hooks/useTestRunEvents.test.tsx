@@ -1,0 +1,916 @@
+import { renderHook, act, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createStore, Provider, useAtomValue } from "jotai";
+import type { PropsWithChildren } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  currentTestRunStateAtom,
+  currentTestRunOutputAtom,
+  setTestRunStateForAppAtom,
+  testRunOutputByAppIdAtom,
+  testRunStateByAppIdAtom,
+  testSpecsByAppIdAtom,
+} from "@/atoms/testRuntimeAtoms";
+import { useTestRunEvents } from "@/hooks/useTestRunEvents";
+import { queryKeys } from "@/lib/queryKeys";
+import { previewModeAtom, selectedAppIdAtom } from "@/atoms/appAtoms";
+import { previewNativeViewAppIdAtom } from "@/atoms/previewAtoms";
+import {
+  configureChatTabWindowSession,
+  getActiveWindowSessionId,
+} from "@/window_infrastructure/chat_tab_session_storage";
+import {
+  PRIMARY_WINDOW_SESSION_ID,
+  WindowSessionIdSchema,
+} from "@/window_infrastructure/types";
+
+const OTHER_WINDOW_SESSION_ID = WindowSessionIdSchema.parse(
+  "10000000-0000-4000-8000-000000000002",
+);
+
+const {
+  outputListeners,
+  runStateListeners,
+  listAppTestsMock,
+  getActiveRunMock,
+} = vi.hoisted(() => ({
+  outputListeners: new Set<(payload: unknown) => void>(),
+  runStateListeners: new Set<(payload: unknown) => void>(),
+  listAppTestsMock: vi.fn(),
+  getActiveRunMock: vi.fn(),
+}));
+
+vi.mock("@/ipc/types", () => ({
+  ipc: {
+    tests: {
+      listAppTests: listAppTestsMock,
+      getActiveRun: getActiveRunMock,
+    },
+    events: {
+      tests: {
+        onOutput: (listener: (payload: unknown) => void) => {
+          outputListeners.add(listener);
+          return () => outputListeners.delete(listener);
+        },
+        onRunState: (listener: (payload: unknown) => void) => {
+          runStateListeners.add(listener);
+          return () => runStateListeners.delete(listener);
+        },
+      },
+    },
+  },
+}));
+
+function emitOutput(payload: Record<string, unknown>) {
+  for (const listener of outputListeners) {
+    listener({ runId: 1, ...payload });
+  }
+}
+
+function emitRunState(payload: Record<string, unknown>) {
+  for (const listener of runStateListeners) {
+    listener({ runId: 1, ...payload });
+  }
+}
+
+function makeWrapper() {
+  const store = createStore();
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 60_000 } },
+  });
+  return {
+    store,
+    queryClient,
+    Wrapper({ children }: PropsWithChildren) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <Provider store={store}>{children}</Provider>
+        </QueryClientProvider>
+      );
+    },
+  };
+}
+
+describe("useTestRunEvents", () => {
+  it.each(["panel", "agent"])(
+    "merges the authoritative terminal sandbox flag for %s runs",
+    (source) => {
+      const { store, Wrapper } = makeWrapper();
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+      act(() =>
+        emitRunState({ appId: 1, source, state: "started", sandboxed: true }),
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.sandboxed).toBe(true);
+      act(() =>
+        emitRunState({
+          appId: 1,
+          source,
+          state: "finished",
+          sandboxed: false,
+          results: [],
+        }),
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.sandboxed).toBe(false);
+    },
+  );
+  beforeEach(() => {
+    outputListeners.clear();
+    runStateListeners.clear();
+    getActiveRunMock.mockReset().mockResolvedValue(null);
+    listAppTestsMock.mockReset();
+    listAppTestsMock.mockResolvedValue({ specs: [] });
+    configureChatTabWindowSession(PRIMARY_WINDOW_SESSION_ID, {
+      mayMigrateLegacySession: false,
+    });
+  });
+
+  it.each(["started", "cleaning-up"])(
+    "carries a batch selection from %s events without clearing unrelated results",
+    (state) => {
+      const { store, Wrapper } = makeWrapper();
+      const files = ["e2e-tests/a.spec.ts", "e2e-tests/b.spec.ts"];
+      const unrelated = "e2e-tests/c.spec.ts";
+      store.set(setTestRunStateForAppAtom, {
+        appId: 1,
+        update: (prev) => ({
+          ...prev,
+          results: { [unrelated]: { file: unrelated, status: "passed" } },
+        }),
+      });
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+      act(() =>
+        emitRunState({ appId: 1, source: "agent", state, testFiles: files }),
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.runningFiles).toEqual(
+        files,
+      );
+      expect(
+        store.get(testRunStateByAppIdAtom).get(1)?.results[unrelated]?.status,
+      ).toBe("passed");
+    },
+  );
+
+  it("merges grep batch events without losing sibling cases", async () => {
+    const { store, Wrapper } = makeWrapper();
+    const files = ["e2e-tests/a.spec.ts", "e2e-tests/b.spec.ts"];
+    const tests = [
+      { title: "login", line: 3 },
+      { title: "logout", line: 8 },
+    ];
+    const specs = files.map((file) => ({ file, tests }));
+    store.set(testSpecsByAppIdAtom, new Map([[1, specs]]));
+    listAppTestsMock.mockResolvedValue({ specs });
+    store.set(setTestRunStateForAppAtom, {
+      appId: 1,
+      update: (prev) => ({
+        ...prev,
+        results: Object.fromEntries(
+          files.map((file) => [
+            file,
+            {
+              file,
+              status: "failed" as const,
+              tests: tests.map((test) => ({
+                ...test,
+                status: "failed" as const,
+                error: "old failure",
+              })),
+            },
+          ]),
+        ),
+      }),
+    });
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFiles: files,
+        grep: "login",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFiles: files,
+        grep: "login",
+        results: files.map((file) => ({
+          file,
+          status: "passed",
+          tests: [{ ...tests[0], status: "passed" }],
+        })),
+      });
+    });
+    await waitFor(() => expect(listAppTestsMock).toHaveBeenCalled());
+    for (const file of files) {
+      expect(
+        store
+          .get(testRunStateByAppIdAtom)
+          .get(1)
+          ?.results[file].tests?.map((test) => test.status),
+      ).toEqual(["passed", "failed"]);
+    }
+  });
+
+  it("tracks panel-initiated lifecycle events for remounts and peer windows", () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({ appId: 1, source: "panel", state: "started" });
+    });
+
+    expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("setup");
+    expect(store.get(testRunStateByAppIdAtom).get(1)?.source).toBe("panel");
+  });
+
+  it.each(["agent", "panel"])(
+    "opens the native preview when a %s run actually starts",
+    (source) => {
+      const { store, Wrapper } = makeWrapper();
+      store.set(selectedAppIdAtom, 1);
+      // Seeded away from the default so the previewMode assertion below can only
+      // pass if the hook actually switches back.
+      store.set(previewModeAtom, "code");
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+      act(() => {
+        emitRunState({
+          appId: 1,
+          source,
+          state: "started",
+          preview: true,
+          previewOwnerWindowSessionId: getActiveWindowSessionId(),
+        });
+      });
+
+      expect(store.get(previewNativeViewAppIdAtom)).toBe(1);
+      expect(store.get(previewModeAtom)).toBe("preview");
+    },
+  );
+
+  it.each(["setup", "running", "cleaning-up"] as const)(
+    "bootstraps a new renderer during %s without activating another preview",
+    async (phase) => {
+      const { store, Wrapper } = makeWrapper();
+      store.set(selectedAppIdAtom, 1);
+      getActiveRunMock.mockResolvedValue({
+        run: {
+          appId: 1,
+          runId: 42,
+          source: "agent",
+          state: "started",
+          testFile: "e2e-tests/a.spec.ts",
+          sandboxed: true,
+          preview: true,
+          previewOwnerWindowSessionId: getActiveWindowSessionId(),
+        },
+        phase,
+        output: "Earlier setup output\n",
+      });
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+      await waitFor(() =>
+        expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe(phase),
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.runningFiles).toContain(
+        "e2e-tests/a.spec.ts",
+      );
+      expect(store.get(testRunOutputByAppIdAtom).get(1)).toContain(
+        "Earlier setup output",
+      );
+      expect(store.get(previewNativeViewAppIdAtom)).toBeNull();
+      await act(async () =>
+        emitRunState({
+          appId: 1,
+          runId: 42,
+          source: "agent",
+          state: "finished",
+          results: [],
+        }),
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("idle");
+    },
+  );
+
+  it("does not resurrect a run that finished while its bootstrap was in flight", async () => {
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 1);
+    let finish!: (value: unknown) => void;
+    getActiveRunMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    await waitFor(() => expect(getActiveRunMock).toHaveBeenCalledOnce());
+    await act(async () => {
+      emitRunState({
+        appId: 1,
+        runId: 42,
+        source: "agent",
+        state: "finished",
+        results: [],
+      });
+      finish({
+        run: { appId: 1, runId: 42, source: "agent", state: "started" },
+        phase: "running",
+        output: "stale",
+      });
+    });
+    expect(store.get(testRunStateByAppIdAtom).get(1)?.phase ?? "idle").toBe(
+      "idle",
+    );
+  });
+
+  it("retains progress for a panel mounted after started and results after that panel unmounts", async () => {
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 1);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "e2e-tests/a.spec.ts",
+      });
+      emitOutput({ appId: 1, phase: "running", chunk: "Executing test" });
+    });
+    const panel = renderHook(
+      () => ({
+        state: useAtomValue(currentTestRunStateAtom),
+        output: useAtomValue(currentTestRunOutputAtom),
+      }),
+      { wrapper: Wrapper },
+    );
+    expect(panel.result.current.state.phase).toBe("running");
+    expect(panel.result.current.state.runningFiles).toContain(
+      "e2e-tests/a.spec.ts",
+    );
+    await waitFor(() =>
+      expect(panel.result.current.output).toContain("Executing test"),
+    );
+    panel.unmount();
+    await act(async () =>
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "e2e-tests/a.spec.ts",
+        results: [{ file: "e2e-tests/a.spec.ts", status: "passed" }],
+      }),
+    );
+    const remounted = renderHook(() => useAtomValue(currentTestRunStateAtom), {
+      wrapper: Wrapper,
+    });
+    expect(remounted.result.current.phase).toBe("idle");
+    expect(
+      remounted.result.current.results["e2e-tests/a.spec.ts"]?.status,
+    ).toBe("passed");
+  });
+
+  it("relays panel started and finished events through the root subscriber", async () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    await act(async () => {
+      emitRunState({
+        appId: 1,
+        source: "panel",
+        state: "started",
+        testFile: "e2e-tests/a.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "panel",
+        state: "finished",
+        testFile: "e2e-tests/a.spec.ts",
+        results: [{ file: "e2e-tests/a.spec.ts", status: "passed" }],
+      });
+    });
+    expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("idle");
+    expect(
+      store.get(testRunStateByAppIdAtom).get(1)?.results["e2e-tests/a.spec.ts"]
+        ?.status,
+    ).toBe("passed");
+  });
+
+  it("leaves another window showing the same app out of an agent preview run", () => {
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 1);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        preview: true,
+        previewOwnerWindowSessionId: OTHER_WINDOW_SESSION_ID,
+      });
+    });
+
+    expect(store.get(previewNativeViewAppIdAtom)).toBeNull();
+    expect(store.get(testRunStateByAppIdAtom).has(1)).toBe(true);
+  });
+
+  it("leaves a window showing a different app alone", () => {
+    // Run state is broadcast to every window, and each shows whichever app IT
+    // has selected. Taking over a window looking elsewhere would replace that
+    // app's preview with a native view nothing drives.
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 2);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        preview: true,
+        previewOwnerWindowSessionId: getActiveWindowSessionId(),
+      });
+    });
+
+    expect(store.get(previewNativeViewAppIdAtom)).toBeNull();
+    // The run itself is still tracked — only the view switch is scoped.
+    expect(store.get(testRunStateByAppIdAtom).has(1)).toBe(true);
+  });
+
+  it("drops the native view when the run falls back to a browser", () => {
+    // Without this the user is left on a native "Test view" with every control
+    // locked by a run that is actually happening in a separate Playwright
+    // window. The only other signal is a warning line in the test output,
+    // which is collapsed by default.
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 1);
+    store.set(previewNativeViewAppIdAtom, 1);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "panel",
+        state: "started",
+        preview: true,
+        previewOwnerWindowSessionId: getActiveWindowSessionId(),
+      });
+      emitRunState({
+        appId: 1,
+        source: "panel",
+        state: "preview-fallback",
+        preview: true,
+        previewOwnerWindowSessionId: getActiveWindowSessionId(),
+      });
+    });
+
+    expect(store.get(previewNativeViewAppIdAtom)).toBeNull();
+  });
+
+  it("leaves another window's native view up on a fallback", () => {
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 1);
+    store.set(previewNativeViewAppIdAtom, 1);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        preview: true,
+        previewOwnerWindowSessionId: OTHER_WINDOW_SESSION_ID,
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "preview-fallback",
+        preview: true,
+        previewOwnerWindowSessionId: OTHER_WINDOW_SESSION_ID,
+      });
+    });
+
+    expect(store.get(previewNativeViewAppIdAtom)).toBe(1);
+  });
+
+  it("leaves a native view belonging to a different app alone on a fallback", () => {
+    const { store, Wrapper } = makeWrapper();
+    store.set(selectedAppIdAtom, 2);
+    store.set(previewNativeViewAppIdAtom, 2);
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        preview: true,
+        previewOwnerWindowSessionId: getActiveWindowSessionId(),
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "preview-fallback",
+        preview: true,
+        previewOwnerWindowSessionId: getActiveWindowSessionId(),
+      });
+    });
+
+    expect(store.get(previewNativeViewAppIdAtom)).toBe(2);
+  });
+
+  it("stores streamed output at root scope", async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, Wrapper } = makeWrapper();
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+      act(() => {
+        emitRunState({ appId: 1, source: "agent", state: "started" });
+        emitOutput({ appId: 1, chunk: "setup\n", phase: "setup" });
+        emitOutput({ appId: 1, chunk: "running\n", phase: "running" });
+        vi.advanceTimersByTime(100);
+      });
+
+      expect(store.get(testRunOutputByAppIdAtom).get(1)).toBe(
+        "setup\nrunning\n",
+      );
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks the app setting up on an agent 'started' event", () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/home.spec.ts",
+      });
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.phase).toBe("setup");
+    expect(state.source).toBe("agent");
+    expect(state.runningFiles).toEqual(["tests/home.spec.ts"]);
+  });
+
+  it("keeps the setup phase for setup output, then advances on running output", () => {
+    vi.useFakeTimers();
+    try {
+      const { store, Wrapper } = makeWrapper();
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+      act(() => {
+        emitRunState({ appId: 1, source: "agent", state: "started" });
+        emitOutput({ appId: 1, chunk: "installing\n", phase: "setup" });
+        vi.advanceTimersByTime(100);
+      });
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("setup");
+
+      act(() => {
+        emitOutput({ appId: 1, chunk: "Running 1 test\n", phase: "running" });
+        vi.advanceTimersByTime(100);
+      });
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("running");
+
+      // Teardown streams setup-phase output after the tests ran; the label
+      // must not flash back to "Setting up testing…".
+      act(() => {
+        emitOutput({ appId: 1, chunk: "cleaning up\n", phase: "setup" });
+        vi.advanceTimersByTime(100);
+      });
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("remembers when cleanup follows a stopped run", () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({ appId: 1, source: "agent", state: "started" });
+      emitRunState({ appId: 1, source: "agent", state: "stopping" });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "cleaning-up",
+        isolation: { mode: "neon-branch" },
+      });
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.phase).toBe("cleaning-up");
+    expect(state.wasStopped).toBe(true);
+  });
+
+  it("recovers authoritative stopped cleanup when the renderer missed earlier events", () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        runId: 3,
+        source: "agent",
+        state: "cleaning-up",
+        wasStopped: true,
+        testFile: "tests/home.spec.ts",
+        isolation: { mode: "neon-branch" },
+      });
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.runId).toBe(3);
+    expect(state.phase).toBe("cleaning-up");
+    expect(state.wasStopped).toBe(true);
+    expect(state.runningFiles).toEqual(["tests/home.spec.ts"]);
+  });
+
+  it("ignores output and terminal events from an older generation", () => {
+    vi.useFakeTimers();
+    try {
+      const { store, Wrapper } = makeWrapper();
+      renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+      act(() => {
+        emitRunState({
+          appId: 1,
+          runId: 1,
+          source: "agent",
+          state: "started",
+          testFile: "tests/old.spec.ts",
+        });
+        emitRunState({
+          appId: 1,
+          runId: 2,
+          source: "agent",
+          state: "started",
+          testFile: "tests/new.spec.ts",
+        });
+        emitOutput({
+          appId: 1,
+          runId: 1,
+          chunk: "old teardown\n",
+          phase: "setup",
+        });
+        emitRunState({
+          appId: 1,
+          runId: 1,
+          source: "agent",
+          state: "finished",
+          results: [],
+        });
+        vi.advanceTimersByTime(100);
+      });
+
+      const state = store.get(testRunStateByAppIdAtom).get(1)!;
+      expect(state.runId).toBe(2);
+      expect(state.phase).toBe("setup");
+      expect(state.runningFiles).toEqual(["tests/new.spec.ts"]);
+      expect(store.get(testRunOutputByAppIdAtom).get(1)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes the spec list before reconciling a finished run, so a spec written this turn shows its result", async () => {
+    const { store, queryClient, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+
+    // The spec atom is empty (the spec was written by the agent this same
+    // turn); the fresh fetch is what makes "home.spec.ts" reconcile onto the
+    // panel's "tests/home.spec.ts" row key.
+    listAppTestsMock.mockResolvedValue({
+      specs: [{ file: "tests/home.spec.ts", tests: [] }],
+    });
+    // Reproduce the production cache window. The subscriber must still hit IPC
+    // instead of reusing this fresh, now-stale list.
+    queryClient.setQueryData(queryKeys.tests.list({ appId: 1 }), { specs: [] });
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/home.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "tests/home.spec.ts",
+        // Playwright reports paths testDir-relative (no "tests/" prefix).
+        results: [{ file: "home.spec.ts", status: "passed" }],
+        isolation: { mode: "neon-branch" },
+      });
+    });
+
+    await waitFor(() => {
+      expect(listAppTestsMock).toHaveBeenCalledWith({ appId: 1 });
+      expect(
+        store.get(testRunStateByAppIdAtom).get(1)?.results["tests/home.spec.ts"]
+          ?.status,
+      ).toBe("passed");
+    });
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.results["tests/home.spec.ts"]?.status).toBe("passed");
+    expect(store.get(testSpecsByAppIdAtom).get(1)).toEqual([
+      { file: "tests/home.spec.ts", tests: [] },
+    ]);
+  });
+
+  it("still finishes the run when the spec-list refresh fails", async () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    listAppTestsMock.mockRejectedValue(new Error("app deleted"));
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/home.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "tests/home.spec.ts",
+        results: [{ file: "tests/home.spec.ts", status: "failed" }],
+      });
+    });
+
+    // A possibly-unreconciled result beats a stranded "running" state.
+    await waitFor(() => {
+      expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("idle");
+    });
+  });
+
+  it("finishes immediately and does not let an older refresh finish a newer run", async () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    let resolveRefresh!: (value: { specs: [] }) => void;
+    listAppTestsMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/old.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "tests/old.spec.ts",
+        results: [{ file: "tests/old.spec.ts", status: "passed" }],
+      });
+    });
+
+    expect(store.get(testRunStateByAppIdAtom).get(1)?.phase).toBe("idle");
+
+    await act(async () => {
+      emitRunState({
+        appId: 1,
+        runId: 2,
+        source: "agent",
+        state: "started",
+        testFile: "tests/new.spec.ts",
+      });
+      resolveRefresh({ specs: [] });
+      await Promise.resolve();
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.phase).toBe("setup");
+    expect(state.runningFiles).toEqual(["tests/new.spec.ts"]);
+  });
+
+  it("does not let a deferred refresh overwrite state with a newer start timestamp", async () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    let resolveRefresh!: (value: { specs: [] }) => void;
+    listAppTestsMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/old.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "tests/old.spec.ts",
+        results: [{ file: "tests/old.spec.ts", status: "passed" }],
+      });
+    });
+
+    const oldStartedAt = store.get(testRunStateByAppIdAtom).get(1)!.startedAt!;
+    act(() => {
+      store.set(setTestRunStateForAppAtom, {
+        appId: 1,
+        update: (prev) => ({
+          ...prev,
+          phase: "running",
+          runningFiles: ["tests/new.spec.ts"],
+          startedAt: oldStartedAt + 1,
+        }),
+      });
+    });
+
+    await act(async () => {
+      resolveRefresh({ specs: [] });
+      await Promise.resolve();
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.phase).toBe("running");
+    expect(state.runningFiles).toEqual(["tests/new.spec.ts"]);
+  });
+
+  it("does not let an older agent refresh finish a newer panel run", async () => {
+    const { store, Wrapper } = makeWrapper();
+    renderHook(() => useTestRunEvents(), { wrapper: Wrapper });
+    let resolveRefresh!: (value: { specs: [] }) => void;
+    listAppTestsMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+
+    act(() => {
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "started",
+        testFile: "tests/old.spec.ts",
+      });
+      emitRunState({
+        appId: 1,
+        source: "agent",
+        state: "finished",
+        testFile: "tests/old.spec.ts",
+        results: [{ file: "tests/old.spec.ts", status: "passed" }],
+      });
+      emitRunState({
+        appId: 1,
+        runId: 2,
+        source: "panel",
+        state: "started",
+        testFile: "tests/new.spec.ts",
+      });
+      store.set(setTestRunStateForAppAtom, {
+        appId: 1,
+        update: {
+          phase: "running",
+          runId: 2,
+          runningFiles: ["tests/new.spec.ts"],
+          runningTests: [],
+          results: {},
+        },
+      });
+    });
+
+    await act(async () => {
+      resolveRefresh({ specs: [] });
+      await Promise.resolve();
+    });
+
+    const state = store.get(testRunStateByAppIdAtom).get(1)!;
+    expect(state.phase).toBe("running");
+    expect(state.runningFiles).toEqual(["tests/new.spec.ts"]);
+    expect(state.results["tests/old.spec.ts"]).toBeUndefined();
+  });
+
+  it("unsubscribes on unmount", () => {
+    const { Wrapper } = makeWrapper();
+    const { unmount } = renderHook(() => useTestRunEvents(), {
+      wrapper: Wrapper,
+    });
+    expect(outputListeners.size).toBe(1);
+    expect(runStateListeners.size).toBe(1);
+    unmount();
+    expect(outputListeners.size).toBe(0);
+    expect(runStateListeners.size).toBe(0);
+  });
+});

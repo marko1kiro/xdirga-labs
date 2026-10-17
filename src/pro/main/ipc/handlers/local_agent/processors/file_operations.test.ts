@@ -1,0 +1,653 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const mocks = vi.hoisted(() => ({
+  getGitUncommittedFiles: vi.fn(),
+  getCurrentCommitHash: vi.fn(),
+  gitAddAll: vi.fn(),
+  gitCommit: vi.fn(),
+  deployAffectedSupabaseFunctions: vi.fn(),
+  deleteSupabaseFunction: vi.fn(),
+  readSettings: vi.fn(),
+  findApp: vi.fn(),
+}));
+
+vi.mock("@/db", () => ({
+  db: { query: { apps: { findFirst: mocks.findApp } } },
+}));
+vi.mock("@/paths/paths", () => ({ getDyadAppPath: (value: string) => value }));
+
+vi.mock("electron-log", () => ({
+  default: {
+    scope: () => ({
+      error: vi.fn(),
+      warn: vi.fn(),
+    }),
+  },
+}));
+
+vi.mock("@/ipc/utils/git_utils", () => ({
+  getGitUncommittedFiles: mocks.getGitUncommittedFiles,
+  getCurrentCommitHash: mocks.getCurrentCommitHash,
+  gitAddAll: mocks.gitAddAll,
+  gitCommit: mocks.gitCommit,
+}));
+
+vi.mock("../../../../../../supabase_admin/supabase_utils", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../../../../supabase_admin/supabase_utils")
+  >("../../../../../../supabase_admin/supabase_utils");
+
+  return {
+    ...actual,
+    deployAffectedSupabaseFunctions: mocks.deployAffectedSupabaseFunctions,
+  };
+});
+
+vi.mock("../../../../../../main/settings", () => ({
+  readSettings: mocks.readSettings,
+}));
+
+vi.mock("@/supabase_admin/supabase_management_client", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/supabase_admin/supabase_management_client")
+  >("@/supabase_admin/supabase_management_client");
+  return {
+    ...actual,
+    deleteSupabaseFunction: mocks.deleteSupabaseFunction,
+  };
+});
+
+import {
+  commitAllChanges,
+  deployAllFunctionsIfNeeded,
+  isSupabaseFunctionNotFoundError,
+  reconcileDeferredFunctionOperations,
+  supabaseFunctionEntryExists,
+} from "./file_operations";
+
+describe("commitAllChanges", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getGitUncommittedFiles.mockResolvedValue(["src/App.tsx"]);
+    mocks.getCurrentCommitHash.mockResolvedValue("current-head");
+    mocks.gitCommit.mockResolvedValue("commit-hash");
+  });
+
+  it("uses the file-count fallback for a whitespace-only chat summary", async () => {
+    const result = await commitAllChanges(
+      {
+        appId: 1,
+        appPath: "/mock/app",
+        supabaseProjectId: null,
+      },
+      "   ",
+    );
+
+    expect(mocks.gitAddAll).toHaveBeenCalledWith({ path: "/mock/app" });
+    expect(mocks.gitCommit).toHaveBeenCalledWith({
+      path: "/mock/app",
+      message: "(1 files changed)",
+    });
+    expect(result).toEqual({ commitHash: "commit-hash" });
+  });
+
+  it("serializes the complete same-app checkpoint and rechecks status", async () => {
+    let releaseFirst!: () => void;
+    const firstCommit = new Promise<string>((resolve) => {
+      releaseFirst = () => resolve("first-hash");
+    });
+    mocks.getGitUncommittedFiles
+      .mockResolvedValueOnce(["first.ts"])
+      .mockResolvedValueOnce([]);
+    mocks.gitCommit.mockReturnValueOnce(firstCommit);
+
+    const first = commitAllChanges({
+      appId: 9,
+      appPath: "/mock/app",
+      fileMutationCount: 1,
+      supabaseProjectId: null,
+    });
+    const second = commitAllChanges({
+      appId: 9,
+      appPath: "/mock/app",
+      fileMutationCount: 1,
+      supabaseProjectId: null,
+    });
+    await vi.waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledOnce());
+    expect(mocks.getGitUncommittedFiles).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await expect(first).resolves.toEqual({ commitHash: "first-hash" });
+    await expect(second).resolves.toEqual({ commitHash: "current-head" });
+    expect(mocks.getGitUncommittedFiles).toHaveBeenCalledTimes(2);
+    expect(mocks.gitAddAll).toHaveBeenCalledOnce();
+  });
+
+  it("does not attribute an existing commit to a clean no-op turn", async () => {
+    mocks.getGitUncommittedFiles.mockResolvedValue([]);
+
+    await expect(
+      commitAllChanges({
+        appId: 1,
+        appPath: "/mock/app",
+        fileMutationCount: 0,
+        supabaseProjectId: null,
+      }),
+    ).resolves.toEqual({ commitHash: undefined });
+
+    expect(mocks.getCurrentCommitHash).not.toHaveBeenCalled();
+  });
+
+  it("keeps a clean mutated turn successful when HEAD cannot be resolved", async () => {
+    mocks.getGitUncommittedFiles.mockResolvedValue([]);
+    mocks.getCurrentCommitHash.mockRejectedValue(new Error("missing HEAD"));
+
+    await expect(
+      commitAllChanges({
+        appId: 1,
+        appPath: "/mock/app",
+        fileMutationCount: 1,
+        supabaseProjectId: null,
+      }),
+    ).resolves.toEqual({ commitHash: undefined });
+  });
+});
+
+describe("deployAllFunctionsIfNeeded", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.readSettings.mockReturnValue({ skipPruneEdgeFunctions: false });
+    mocks.deployAffectedSupabaseFunctions.mockResolvedValue([]);
+    mocks.deleteSupabaseFunction.mockResolvedValue(undefined);
+    mocks.findApp.mockResolvedValue({
+      supabaseProjectId: "project-id",
+      path: "/apps/test",
+    });
+  });
+
+  it("explains a dependency-analysis fallback in the deploy status", async () => {
+    mocks.deployAffectedSupabaseFunctions.mockImplementationOnce(
+      async ({ onScopeResolved, onProgress }) => {
+        onScopeResolved({
+          kind: "all",
+          reason: {
+            code: "unresolved_relative_import",
+            filePath: "supabase/functions/alpha/index.ts",
+            specifier: "../_shared/missing.ts",
+          },
+        });
+        onProgress({
+          phase: "finished",
+          total: 2,
+          active: 0,
+          queued: 0,
+          completed: 2,
+          succeeded: 2,
+          failed: 0,
+        });
+        return [];
+      },
+    );
+    const onXmlComplete = vi.fn();
+
+    await expect(
+      deployAllFunctionsIfNeeded({
+        appId: 1,
+        appPath: "/apps/test",
+        supabaseProjectId: "project-id",
+        supabaseOrganizationSlug: null,
+        isSharedModulesChanged: true,
+        sharedServerModulePaths: ["supabase/functions/_shared/foo.ts"],
+        pendingFunctionDeploys: [],
+        pendingFunctionDeletes: [],
+        onXmlStream: vi.fn(),
+        onXmlComplete,
+      }),
+    ).resolves.toEqual({ success: true });
+
+    expect(onXmlComplete).toHaveBeenCalledWith(
+      '<dyad-status title="Supabase functions deployed: 2/2 complete (fallback to all functions: unresolved import)" state="finished">\nRedeployed all functions because dependency analysis couldn\'t resolve "../_shared/missing.ts" imported from supabase/functions/alpha/index.ts.\n\n2 succeeded\n0 failed\n0 active\n0 queued\n</dyad-status>',
+    );
+  });
+
+  it("rejects a stale project captured by an earlier chat before any remote effects", async () => {
+    mocks.findApp.mockResolvedValueOnce({
+      supabaseProjectId: "replacement-project",
+    });
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: ["alpha"],
+      pendingFunctionDeletes: ["beta"],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining("project changed"),
+    });
+    expect(mocks.deployAffectedSupabaseFunctions).not.toHaveBeenCalled();
+    expect(mocks.deleteSupabaseFunction).not.toHaveBeenCalled();
+  });
+
+  it("releases preparation claims after capture and retains same-app deployment exclusion", async () => {
+    const { appOperationCoordinator } =
+      await import("@/ipc/services/app_operation_coordinator");
+    const access = vi.spyOn(fs, "access").mockResolvedValue(undefined);
+    let releaseUpload!: () => void;
+    let captured!: () => void;
+    const snapshotCaptured = new Promise<void>((resolve) => {
+      captured = resolve;
+    });
+    mocks.deployAffectedSupabaseFunctions.mockImplementationOnce(
+      async ({ onSnapshotCaptured }) => {
+        await onSnapshotCaptured();
+        captured();
+        await new Promise<void>((resolve) => {
+          releaseUpload = resolve;
+        });
+        return [];
+      },
+    );
+    const deploy = deployAllFunctionsIfNeeded({
+      appId: 12,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: ["alpha"],
+      pendingFunctionDeletes: [],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+    await snapshotCaptured;
+    try {
+      await appOperationCoordinator.run(
+        {
+          appId: 12,
+          operation: "tests",
+          resources: ["provider", "repository-worktree"],
+        },
+        async () => {},
+      );
+      expect(appOperationCoordinator.isBusy(12, ["supabase-functions"])).toBe(
+        true,
+      );
+    } finally {
+      releaseUpload();
+      await deploy;
+      access.mockRestore();
+    }
+  });
+
+  it("keeps a completed deployment successful when cancelled after deferred deletes ran", async () => {
+    const access = vi.spyOn(fs, "access").mockImplementation(async (target) => {
+      if (String(target).includes(`${path.sep}gone${path.sep}`)) {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }
+    });
+    const abortController = new AbortController();
+    mocks.deployAffectedSupabaseFunctions.mockImplementationOnce(
+      async ({ onSnapshotCaptured }) => {
+        await onSnapshotCaptured();
+        // Stop lands after activation, before the finalizer's fallback call.
+        abortController.abort();
+        return [];
+      },
+    );
+    try {
+      const result = await deployAllFunctionsIfNeeded({
+        appId: 13,
+        appPath: "/apps/test",
+        supabaseProjectId: "project-id",
+        supabaseOrganizationSlug: null,
+        isSharedModulesChanged: false,
+        sharedServerModulePaths: [],
+        pendingFunctionDeploys: ["alpha"],
+        pendingFunctionDeletes: ["gone"],
+        abortSignal: abortController.signal,
+        onXmlStream: vi.fn(),
+        onXmlComplete: vi.fn(),
+      });
+      expect(result).toEqual({ success: true });
+      expect(mocks.deleteSupabaseFunction).toHaveBeenCalledOnce();
+    } finally {
+      access.mockRestore();
+    }
+  });
+
+  it("delegates shared changes and skipped direct function deploys to the shared deploy helper", async () => {
+    const access = vi.spyOn(fs, "access").mockResolvedValueOnce(undefined);
+    try {
+      const result = await deployAllFunctionsIfNeeded({
+        appId: 1,
+        appPath: "/apps/test",
+        supabaseProjectId: "project-id",
+        supabaseOrganizationSlug: null,
+        isSharedModulesChanged: true,
+        sharedServerModulePaths: ["supabase/functions/_shared/foo.ts"],
+        pendingFunctionDeploys: ["beta"],
+        onXmlStream: vi.fn(),
+        onXmlComplete: vi.fn(),
+      });
+
+      expect(result).toEqual({ success: true });
+      expect(mocks.deployAffectedSupabaseFunctions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          appPath: "/apps/test",
+          supabaseProjectId: "project-id",
+          supabaseOrganizationSlug: null,
+          skipPruneEdgeFunctions: false,
+          sharedModulesChanged: true,
+          changedSharedModulePaths: ["supabase/functions/_shared/foo.ts"],
+          pendingFunctionDeploys: ["beta"],
+          onProgress: expect.any(Function),
+        }),
+      );
+    } finally {
+      access.mockRestore();
+    }
+  });
+
+  it("serializes same-app reconciliation and rechecks after admission", async () => {
+    const access = vi.spyOn(fs, "access").mockResolvedValue(undefined);
+    let releaseFirst!: () => void;
+    mocks.deployAffectedSupabaseFunctions.mockImplementationOnce(
+      () =>
+        new Promise<string[]>((resolve) => {
+          releaseFirst = () => resolve([]);
+        }),
+    );
+    const context = {
+      appId: 12,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: ["alpha"],
+      pendingFunctionDeletes: [],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    };
+    try {
+      const first = deployAllFunctionsIfNeeded(context);
+      const second = deployAllFunctionsIfNeeded(context);
+      await vi.waitFor(() =>
+        expect(mocks.deployAffectedSupabaseFunctions).toHaveBeenCalledOnce(),
+      );
+      expect(access).toHaveBeenCalledTimes(1);
+
+      releaseFirst();
+      await expect(first).resolves.toEqual({ success: true });
+      await expect(second).resolves.toEqual({ success: true });
+      expect(access).toHaveBeenCalledTimes(2);
+      expect(mocks.deployAffectedSupabaseFunctions).toHaveBeenCalledTimes(2);
+    } finally {
+      access.mockRestore();
+    }
+  });
+
+  it("returns coordinator admission failures as deploy results", async () => {
+    const { appOperationCoordinator } =
+      await import("@/ipc/services/app_operation_coordinator");
+    const run = vi
+      .spyOn(appOperationCoordinator, "run")
+      .mockRejectedValueOnce(new Error("recording active"));
+    try {
+      await expect(
+        deployAllFunctionsIfNeeded({
+          appId: 1,
+          appPath: "/apps/test",
+          supabaseProjectId: "project-id",
+          supabaseOrganizationSlug: null,
+          isSharedModulesChanged: true,
+          sharedServerModulePaths: [],
+          pendingFunctionDeploys: [],
+          onXmlStream: vi.fn(),
+          onXmlComplete: vi.fn(),
+        }),
+      ).resolves.toEqual({
+        success: false,
+        error: expect.stringContaining("recording active"),
+      });
+    } finally {
+      run.mockRestore();
+    }
+  });
+
+  it("returns deploy warnings from the shared helper", async () => {
+    mocks.deployAffectedSupabaseFunctions.mockResolvedValueOnce([
+      "Failed to bundle alpha",
+    ]);
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: true,
+      sharedServerModulePaths: ["supabase/functions/_shared/unused.ts"],
+      pendingFunctionDeploys: [],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+
+    expect(result).toEqual({
+      success: true,
+      warning:
+        "Some Supabase functions failed to deploy: Failed to bundle alpha",
+    });
+  });
+
+  it("runs deferred child function deletions during root finalization", async () => {
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: "org",
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: [],
+      pendingFunctionDeletes: ["old-function", "old-function"],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.deleteSupabaseFunction).toHaveBeenCalledTimes(1);
+    expect(mocks.deleteSupabaseFunction).toHaveBeenCalledWith({
+      supabaseProjectId: "project-id",
+      functionName: "old-function",
+      organizationSlug: "org",
+    });
+    expect(mocks.deployAffectedSupabaseFunctions).not.toHaveBeenCalled();
+  });
+
+  it.each(["returns errors", "throws", "captures successfully", "cancels"])(
+    "handles confirmed deletes when deployment preparation %s",
+    async (outcome) => {
+      const access = vi.spyOn(fs, "access").mockImplementation(async (file) => {
+        if (String(file).includes("removed")) {
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        }
+      });
+      const controller = new AbortController();
+      mocks.deployAffectedSupabaseFunctions.mockImplementationOnce(
+        async ({ onSnapshotCaptured }) => {
+          if (outcome === "throws") throw new Error("inventory failed");
+          if (outcome === "captures successfully") {
+            await onSnapshotCaptured();
+            return [];
+          }
+          if (outcome === "cancels") controller.abort();
+          return ["shared capture failed"];
+        },
+      );
+      try {
+        const result = await deployAllFunctionsIfNeeded({
+          appId: 1,
+          appPath: "/apps/test",
+          supabaseProjectId: "project-id",
+          supabaseOrganizationSlug: null,
+          isSharedModulesChanged: true,
+          sharedServerModulePaths: [],
+          pendingFunctionDeploys: ["surviving"],
+          pendingFunctionDeletes: ["removed"],
+          onXmlStream: vi.fn(),
+          onXmlComplete: vi.fn(),
+          abortSignal: controller.signal,
+        });
+        if (outcome === "cancels") {
+          expect(result.success).toBe(false);
+          expect(mocks.deleteSupabaseFunction).not.toHaveBeenCalled();
+        } else {
+          expect(result.success).toBe(true);
+          expect(mocks.deleteSupabaseFunction).toHaveBeenCalledOnce();
+          expect(mocks.deleteSupabaseFunction).toHaveBeenCalledWith(
+            expect.objectContaining({ functionName: "removed" }),
+          );
+          if (outcome !== "captures successfully") {
+            expect(result.warning).toContain("failed");
+          }
+        }
+      } finally {
+        access.mockRestore();
+      }
+    },
+  );
+
+  it("treats an already-missing deferred function as deleted", async () => {
+    mocks.deleteSupabaseFunction.mockRejectedValueOnce({
+      response: { status: 404 },
+    });
+
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: [],
+      pendingFunctionDeletes: ["never-deployed"],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(isSupabaseFunctionNotFoundError({ response: { status: 404 } })).toBe(
+      true,
+    );
+  });
+
+  it("preserves deferred remote deletions when pruning is disabled", async () => {
+    mocks.readSettings.mockReturnValueOnce({ skipPruneEdgeFunctions: true });
+
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: [],
+      pendingFunctionDeletes: ["preserved"],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+
+    expect(result).toEqual({
+      success: true,
+      warning:
+        'Kept remote Supabase function(s) preserved because "Keep extra Supabase edge functions" is enabled.',
+    });
+    expect(mocks.deleteSupabaseFunction).not.toHaveBeenCalled();
+  });
+
+  it("does not delete remotely when local function inspection is uncertain", async () => {
+    const access = vi.spyOn(fs, "access").mockRejectedValueOnce(
+      Object.assign(new Error("permission denied"), {
+        code: "EACCES",
+      }),
+    );
+    const result = await deployAllFunctionsIfNeeded({
+      appId: 1,
+      appPath: "/apps/test",
+      supabaseProjectId: "project-id",
+      supabaseOrganizationSlug: null,
+      isSharedModulesChanged: false,
+      sharedServerModulePaths: [],
+      pendingFunctionDeploys: [],
+      pendingFunctionDeletes: ["uncertain"],
+      onXmlStream: vi.fn(),
+      onXmlComplete: vi.fn(),
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: expect.stringContaining("permission denied"),
+    });
+    expect(mocks.deleteSupabaseFunction).not.toHaveBeenCalled();
+    access.mockRestore();
+  });
+});
+
+describe("reconcileDeferredFunctionOperations", () => {
+  it("deploys a function restored after a deferred delete", async () => {
+    await expect(
+      reconcileDeferredFunctionOperations({
+        pendingDeploys: [],
+        pendingDeletes: ["restored"],
+        functionExists: (name) => name === "restored",
+      }),
+    ).resolves.toEqual({ deploys: ["restored"], deletes: [] });
+  });
+
+  it("deletes a function removed after a deferred deploy", async () => {
+    await expect(
+      reconcileDeferredFunctionOperations({
+        pendingDeploys: ["removed"],
+        pendingDeletes: ["removed"],
+        functionExists: () => false,
+      }),
+    ).resolves.toEqual({ deploys: [], deletes: ["removed"] });
+  });
+
+  it("drops a deploy-only function removed before finalization", async () => {
+    await expect(
+      reconcileDeferredFunctionOperations({
+        pendingDeploys: ["removed"],
+        pendingDeletes: [],
+        functionExists: () => false,
+      }),
+    ).resolves.toEqual({ deploys: [], deletes: ["removed"] });
+  });
+});
+
+describe("supabaseFunctionEntryExists", () => {
+  it("requires the concrete index.ts entry point", async () => {
+    const appPath = await fs.mkdtemp(path.join(os.tmpdir(), "dyad-functions-"));
+    const functionPath = path.join(appPath, "supabase", "functions", "hello");
+    try {
+      await fs.mkdir(functionPath, { recursive: true });
+      await expect(supabaseFunctionEntryExists(appPath, "hello")).resolves.toBe(
+        false,
+      );
+
+      await fs.writeFile(path.join(functionPath, "index.ts"), "export {};");
+      await expect(supabaseFunctionEntryExists(appPath, "hello")).resolves.toBe(
+        true,
+      );
+    } finally {
+      await fs.rm(appPath, { recursive: true, force: true });
+    }
+  });
+});

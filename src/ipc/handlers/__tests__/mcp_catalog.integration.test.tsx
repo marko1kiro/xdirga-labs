@@ -1,0 +1,714 @@
+// Drives the curated-catalog section of the Plugins page over the
+// real mcp:* IPC handlers: the catalog is served by a local HTTP
+// server, the entry points at a real fake MCP server, and adding it
+// goes through the real add-from-catalog flow.
+import http from "node:http";
+import path from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+
+import { ipc } from "@/ipc/types";
+import { clearMcpCatalogCacheForTests } from "@/ipc/shared/remote_mcp_catalog";
+import {
+  setupHybridChatHarness,
+  type HybridChatHarness,
+} from "@/testing/hybrid_chat_harness";
+import { h } from "@/testing/hybrid.setup";
+import { eq } from "drizzle-orm";
+import { db } from "@/db";
+import { mcpServers } from "@/db/schema";
+import {
+  decryptFromString,
+  encryptToString,
+} from "@/ipc/utils/mcp_oauth_provider";
+import { syncVendoredOAuthClient } from "@/ipc/utils/vendored_oauth_client";
+
+vi.mock("@/lib/toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/toast")>()),
+  showSuccess: vi.fn(),
+}));
+
+describe("Plugins catalog (integration)", () => {
+  let harness: HybridChatHarness;
+  let catalogServer: http.Server;
+  let mcpServerProcess: ChildProcess;
+  let mcpPort: number;
+  // The payload the catalog endpoint serves. Mutable so a test can swap
+  // in a different set of entries; reset it in a finally.
+  let catalogPayload: unknown;
+
+  beforeAll(async () => {
+    // A real fake MCP server for the catalog entry to point at.
+    mcpServerProcess = spawn(
+      "node",
+      [path.join(process.cwd(), "testing", "fake-http-mcp-server.mjs")],
+      { env: { ...process.env, PORT: "0" }, stdio: "pipe" },
+    );
+    mcpPort = await new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("MCP server start timeout")),
+        10_000,
+      );
+      let buffer = "";
+      mcpServerProcess.stdout?.on("data", (data: Buffer) => {
+        buffer += data.toString();
+        const match = buffer.match(
+          /HTTP MCP server running on http:\/\/localhost:(\d+)\/mcp/,
+        );
+        if (match) {
+          clearTimeout(timeout);
+          resolve(Number(match[1]));
+        }
+      });
+      mcpServerProcess.once("error", reject);
+    });
+
+    // A local catalog endpoint serving one addable entry by default.
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-open",
+          name: "Integration Open Server",
+          category: "Testing",
+          transport: "http",
+          url: `http://localhost:${mcpPort}/mcp`,
+        },
+      ],
+    };
+    catalogServer = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(catalogPayload));
+    });
+    await new Promise<void>((resolve) =>
+      catalogServer.listen(0, "127.0.0.1", resolve),
+    );
+    const address = catalogServer.address();
+    if (typeof address === "object" && address) {
+      process.env.DYAD_MCP_CATALOG_URL = `http://127.0.0.1:${address.port}/`;
+    }
+
+    harness = await setupHybridChatHarness({
+      electronMock: h,
+      settings: {
+        isTestMode: true,
+        enableMcpServersForBuildMode: true,
+      },
+    });
+  }, 60_000);
+
+  beforeEach(async () => {
+    clearMcpCatalogCacheForTests();
+    const servers = await ipc.mcp.listServers();
+    for (const server of servers) {
+      await ipc.mcp.deleteServer(server.id);
+    }
+  });
+
+  afterAll(async () => {
+    delete process.env.DYAD_MCP_CATALOG_URL;
+    await harness?.dispose();
+    catalogServer?.close();
+    mcpServerProcess?.kill();
+  });
+
+  it("adds a catalog entry with one click and discovers its tools", async () => {
+    harness.mountSurface({ route: "/plugins" });
+
+    const card = await screen.findByTestId("catalog-card");
+    expect(card.textContent).toContain("Integration Open Server");
+
+    fireEvent.click(within(card).getByRole("button", { name: "Add" }));
+
+    // Added state on the catalog card, server row in the list above.
+    await within(card).findByText("Added");
+    const servers = await ipc.mcp.listServers();
+    expect(servers).toHaveLength(1);
+    expect(servers[0].catalogSlug).toBe("integration-open");
+
+    // Tool discovery completes against the real fake MCP server.
+    await waitFor(
+      async () => {
+        const result = await ipc.mcp.listTools(servers[0].id);
+        expect(result.status).toBe("ok");
+        expect(result.tools.map((t) => t.name)).toContain("calculator_add");
+      },
+      { timeout: 15_000 },
+    );
+
+    // The configured plugin's summary card shows the catalog mark and the
+    // icon tile. The fixture entry has no icon, so it falls back to the
+    // initial.
+    const pluginCard = await screen.findByTestId("plugin-card");
+    expect(within(pluginCard).getByTestId("catalog-badge")).toBeTruthy();
+    expect(
+      within(pluginCard).getByTestId("plugin-icon-fallback").textContent,
+    ).toBe("I");
+
+    // Tools and Delete live on the detail page.
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open Integration Open Server",
+      }),
+    );
+    const detail = await screen.findByTestId("plugin-detail");
+    await within(detail).findByText("calculator_add", {}, { timeout: 15_000 });
+    expect(detail.textContent).toContain("Catalog");
+
+    // Deleting the plugin makes the catalog entry addable again.
+    fireEvent.click(within(detail).getByRole("button", { name: "Delete" }));
+    const confirm = await screen.findByRole("alertdialog");
+    fireEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await waitFor(async () => {
+      expect(await ipc.mcp.listServers()).toHaveLength(0);
+    });
+    // Navigating back remounts the catalog; re-find the card (the
+    // earlier reference is detached) and confirm it is addable again.
+    await waitFor(async () => {
+      const readdable = await screen.findByTestId("catalog-card");
+      within(readdable).getByRole("button", { name: "Add" });
+    });
+  }, 40_000);
+
+  it("features flagged entries at the top and still lists them by category", async () => {
+    // A catalog with one featured and one plain entry, served from a
+    // separate endpoint just for this test.
+    const featuredServer = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          servers: [
+            {
+              slug: "integration-featured",
+              name: "Integration Featured Server",
+              category: "Testing",
+              transport: "http",
+              url: `http://localhost:${mcpPort}/mcp`,
+              featured: true,
+            },
+            {
+              slug: "integration-plain",
+              name: "Integration Plain Server",
+              category: "Testing",
+              transport: "http",
+              url: `http://localhost:${mcpPort}/mcp`,
+            },
+          ],
+        }),
+      );
+    });
+    await new Promise<void>((resolve) =>
+      featuredServer.listen(0, "127.0.0.1", resolve),
+    );
+    const previousUrl = process.env.DYAD_MCP_CATALOG_URL;
+    try {
+      const address = featuredServer.address();
+      if (typeof address === "object" && address) {
+        process.env.DYAD_MCP_CATALOG_URL = `http://127.0.0.1:${address.port}/`;
+      }
+      clearMcpCatalogCacheForTests();
+
+      // Scope to this mount's tree; earlier tests leave their DOM behind.
+      const view = harness.mountSurface({ route: "/plugins" });
+      const scope = within(view.container);
+
+      // The featured entry appears in the Featured section; the plain one
+      // does not.
+      const featuredSection = await scope.findByTestId("catalog-featured");
+      within(featuredSection).getByText("Integration Featured Server");
+      expect(
+        within(featuredSection).queryByText("Integration Plain Server"),
+      ).toBeNull();
+
+      // The featured entry is still listed under its category, so it
+      // renders twice; the plain entry only once.
+      await waitFor(() => {
+        expect(scope.getAllByText("Integration Featured Server")).toHaveLength(
+          2,
+        );
+      });
+      expect(scope.getAllByText("Integration Plain Server")).toHaveLength(1);
+    } finally {
+      process.env.DYAD_MCP_CATALOG_URL = previousUrl;
+      featuredServer.close();
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("aborts an stdio add when the catalog no longer matches the consent", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-stdio",
+          name: "Integration Stdio Server",
+          category: "Testing",
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      // A stdio add with no reviewed config never went through consent, so
+      // it is rejected.
+      await expect(
+        ipc.mcp.addFromCatalog({ slug: "integration-stdio" }),
+      ).rejects.toThrow(/changed/i);
+      expect(await ipc.mcp.listServers()).toHaveLength(0);
+
+      // A config that differs from the served entry (as if the catalog
+      // changed after the consent prompt) is rejected and adds nothing.
+      await expect(
+        ipc.mcp.addFromCatalog({
+          slug: "integration-stdio",
+          expectedStdioConfig: {
+            command: "npx",
+            args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@2.0.0"],
+          },
+        }),
+      ).rejects.toThrow(/changed/i);
+      expect(await ipc.mcp.listServers()).toHaveLength(0);
+
+      // The matching config adds the row.
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-stdio",
+        expectedStdioConfig: {
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+        },
+      });
+      expect(created.catalogSlug).toBe("integration-stdio");
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("adds a field-requiring entry disabled, then setup enables it", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-apikey",
+          name: "Integration API-key Server",
+          category: "Testing",
+          transport: "http",
+          url: `http://localhost:${mcpPort}/mcp`,
+          inputs: [
+            {
+              kind: "header",
+              name: "Authorization",
+              prefix: "Bearer ",
+              label: "API key",
+            },
+          ],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      // A declared-input entry is added disabled so it can't connect
+      // before the user fills in the key.
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-apikey",
+      });
+      expect(created.enabled).toBe(false);
+      expect(created.catalogSlug).toBe("integration-apikey");
+
+      // Saving the setup fields writes the header and enables the server.
+      const updated = await ipc.mcp.updateServer({
+        id: created.id,
+        enabled: true,
+        headersJson: { Authorization: "Bearer secret-key" },
+      });
+      expect(updated.enabled).toBe(true);
+      expect(updated.headersJson).toEqual({
+        Authorization: "Bearer secret-key",
+      });
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("adds a field-requiring stdio entry disabled, then setup writes its env var", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-env",
+          name: "Integration Env Server",
+          category: "Testing",
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+          inputs: [{ kind: "env", name: "API_TOKEN", label: "Token" }],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      // A stdio entry with inputs is added disabled too, so its package
+      // never spawns before the env var is filled in.
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-env",
+        expectedStdioConfig: {
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+        },
+      });
+      expect(created.enabled).toBe(false);
+      expect(created.transport).toBe("stdio");
+
+      const updated = await ipc.mcp.updateServer({
+        id: created.id,
+        enabled: true,
+        envJson: { API_TOKEN: "tok-123" },
+      });
+      expect(updated.enabled).toBe(true);
+      expect(updated.envJson).toEqual({ API_TOKEN: "tok-123" });
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("adds an entry whose only inputs are optional enabled right away", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-optional-env",
+          name: "Integration Optional Env Server",
+          category: "Testing",
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+          inputs: [
+            {
+              kind: "env",
+              name: "ACCOUNT_ID",
+              label: "Account ID",
+              optional: true,
+            },
+          ],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      // Nothing is required before first use, so there is no setup step
+      // to hold the server disabled behind.
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-optional-env",
+        expectedStdioConfig: {
+          command: "npx",
+          args: ["-y", "@dyad-sh/e2e-nonexistent-mcp@1.0.0"],
+        },
+      });
+      expect(created.enabled).toBe(true);
+      expect(created.transport).toBe("stdio");
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("adds an oauth entry disabled, then setup stores encrypted client credentials", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-oauth",
+          name: "Integration OAuth Server",
+          category: "Testing",
+          transport: "http",
+          url: `http://localhost:${mcpPort}/mcp`,
+          oauth: { required: true },
+          inputs: [{ kind: "oauthClientId" }, { kind: "oauthClientSecret" }],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-oauth",
+      });
+      expect(created.enabled).toBe(false);
+      expect(created.oauthEnabled).toBe(true);
+      expect(created.oauthClientId).toBeNull();
+
+      const updated = await ipc.mcp.updateServer({
+        id: created.id,
+        enabled: true,
+        oauthClientId: "client-abc",
+        oauthClientSecret: "secret-xyz",
+      });
+      expect(updated.enabled).toBe(true);
+      expect(updated.oauthClientId).toBe("client-abc");
+      // The client secret is encrypted at rest and never sent to the
+      // renderer: it isn't on the returned server, and the stored value
+      // is not the plaintext but decrypts back to it.
+      expect(updated).not.toHaveProperty("oauthClientSecret");
+      const [row] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(row.oauthClientSecret).not.toBe("secret-xyz");
+      expect(decryptFromString(row.oauthClientSecret!)).toBe("secret-xyz");
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("adds an entry with a vendored oauth client enabled, with the client stored", async () => {
+    const previousPayload = catalogPayload;
+    catalogPayload = {
+      servers: [
+        {
+          slug: "integration-vendored",
+          name: "Integration Vendored Server",
+          category: "Testing",
+          transport: "http",
+          url: `http://localhost:${mcpPort}/mcp`,
+          oauth: { required: true },
+          inputs: [
+            {
+              kind: "vendoredOAuthClient",
+              clientId: "vendored-id",
+              clientSecret: "vendored-secret",
+            },
+          ],
+        },
+      ],
+    };
+    clearMcpCatalogCacheForTests();
+    try {
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-vendored",
+      });
+      // Nothing for the user to fill in, so no setup step.
+      expect(created.enabled).toBe(true);
+      expect(created.oauthEnabled).toBe(true);
+      expect(created.oauthClientId).toBe("vendored-id");
+      expect(created).not.toHaveProperty("oauthClientSecret");
+      const [row] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(decryptFromString(row.oauthClientSecret!)).toBe("vendored-secret");
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+
+  it("restores and refreshes a vendored oauth client on an existing server", async () => {
+    const previousPayload = catalogPayload;
+    const vendoredEntry = (clientSecret: string) => ({
+      slug: "integration-vendored",
+      name: "Integration Vendored Server",
+      category: "Testing",
+      transport: "http",
+      url: `http://localhost:${mcpPort}/mcp`,
+      oauth: { required: true },
+      inputs: [
+        { kind: "vendoredOAuthClient", clientId: "vendored-id", clientSecret },
+      ],
+    });
+    catalogPayload = { servers: [vendoredEntry("first-secret")] };
+    clearMcpCatalogCacheForTests();
+    try {
+      const created = await ipc.mcp.addFromCatalog({
+        slug: "integration-vendored",
+      });
+
+      // Turning OAuth off clears the client columns, which would otherwise
+      // leave the server looking configured with no client to connect with.
+      await ipc.mcp.updateServer({ id: created.id, oauthEnabled: false });
+      const [wiped] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(wiped.oauthClientId).toBeNull();
+
+      // Nothing is written back while OAuth is off.
+      expect(await syncVendoredOAuthClient(created.id)).toBe(false);
+
+      // Turning OAuth back on restores the client it needs to connect.
+      await ipc.mcp.updateServer({ id: created.id, oauthEnabled: true });
+      expect(await syncVendoredOAuthClient(created.id)).toBe(true);
+      const [restored] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(restored.oauthClientId).toBe("vendored-id");
+      expect(decryptFromString(restored.oauthClientSecret!)).toBe(
+        "first-secret",
+      );
+
+      // A rotated secret reaches a server that was added before the
+      // change, including the client the provider stored on first connect.
+      await db
+        .update(mcpServers)
+        .set({
+          oauthState: encryptToString(
+            JSON.stringify({
+              tokens: { access_token: "token-1", token_type: "bearer" },
+              clientInformation: {
+                client_id: "vendored-id",
+                client_secret: "first-secret",
+              },
+            }),
+          ),
+        })
+        .where(eq(mcpServers.id, created.id));
+      catalogPayload = { servers: [vendoredEntry("second-secret")] };
+      clearMcpCatalogCacheForTests();
+      await syncVendoredOAuthClient(created.id);
+      const [rotated] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(decryptFromString(rotated.oauthClientSecret!)).toBe(
+        "second-secret",
+      );
+      const rotatedState = JSON.parse(
+        decryptFromString(rotated.oauthState!),
+      ) as {
+        tokens?: { access_token?: string };
+        clientInformation?: { client_id: string; client_secret?: string };
+      };
+      expect(rotatedState.clientInformation).toEqual({
+        client_id: "vendored-id",
+        client_secret: "second-secret",
+      });
+      // Same client, so the tokens it issued stay valid.
+      expect(rotatedState.tokens?.access_token).toBe("token-1");
+
+      // A different client id invalidates the tokens it issued.
+      catalogPayload = {
+        servers: [
+          {
+            ...vendoredEntry("second-secret"),
+            inputs: [
+              {
+                kind: "vendoredOAuthClient",
+                clientId: "replacement-id",
+                clientSecret: "second-secret",
+              },
+            ],
+          },
+        ],
+      };
+      clearMcpCatalogCacheForTests();
+      await syncVendoredOAuthClient(created.id);
+      const [reclient] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(reclient.oauthClientId).toBe("replacement-id");
+      expect(reclient.oauthState).toBeNull();
+
+      catalogPayload = { servers: [vendoredEntry("second-secret")] };
+      clearMcpCatalogCacheForTests();
+      await syncVendoredOAuthClient(created.id);
+
+      // Adding the same entry again returns the existing server with the
+      // current client rather than the copy it was created with.
+      const readded = await ipc.mcp.addFromCatalog({
+        slug: "integration-vendored",
+      });
+      expect(readded.id).toBe(created.id);
+      expect(readded.oauthClientId).toBe("vendored-id");
+
+      // A stored client the provider saved is sent in place of the columns,
+      // so it is stale on its own even while the columns are current.
+      await db
+        .update(mcpServers)
+        .set({
+          oauthState: encryptToString(
+            JSON.stringify({
+              clientInformation: {
+                client_id: "vendored-id",
+                client_secret: "stale-secret",
+              },
+            }),
+          ),
+        })
+        .where(eq(mcpServers.id, created.id));
+      expect(await syncVendoredOAuthClient(created.id)).toBe(true);
+      const [repaired] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      const repairedState = JSON.parse(
+        decryptFromString(repaired.oauthState!),
+      ) as { clientInformation?: { client_secret?: string } };
+      expect(repairedState.clientInformation?.client_secret).toBe(
+        "second-secret",
+      );
+
+      // Tokens belong to the client that issued them, so a changed client id
+      // drops them even when no stored client says which one that was.
+      await db
+        .update(mcpServers)
+        .set({
+          oauthClientId: "stale-id",
+          oauthState: encryptToString(
+            JSON.stringify({
+              tokens: { access_token: "token-2", token_type: "bearer" },
+            }),
+          ),
+        })
+        .where(eq(mcpServers.id, created.id));
+      expect(await syncVendoredOAuthClient(created.id)).toBe(true);
+      const [reissued] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(reissued.oauthClientId).toBe("vendored-id");
+      expect(reissued.oauthState).toBeNull();
+
+      // A rotated secret for the same client leaves those tokens usable.
+      await db
+        .update(mcpServers)
+        .set({
+          oauthClientSecret: encryptToString("outdated-secret"),
+          oauthState: encryptToString(
+            JSON.stringify({
+              tokens: { access_token: "token-3", token_type: "bearer" },
+            }),
+          ),
+        })
+        .where(eq(mcpServers.id, created.id));
+      expect(await syncVendoredOAuthClient(created.id)).toBe(true);
+      const [rotatedOnly] = await db
+        .select()
+        .from(mcpServers)
+        .where(eq(mcpServers.id, created.id));
+      expect(decryptFromString(rotatedOnly.oauthClientSecret!)).toBe(
+        "second-secret",
+      );
+      const keptState = JSON.parse(
+        decryptFromString(rotatedOnly.oauthState!),
+      ) as { tokens?: { access_token?: string } };
+      expect(keptState.tokens?.access_token).toBe("token-3");
+    } finally {
+      catalogPayload = previousPayload;
+      clearMcpCatalogCacheForTests();
+    }
+  }, 40_000);
+});

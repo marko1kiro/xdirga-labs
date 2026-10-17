@@ -1,0 +1,295 @@
+import { db } from "../../db";
+import { mcpServers } from "../../db/schema";
+import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
+import { eq } from "drizzle-orm";
+
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
+import {
+  captureMcpOAuthWriteAuthority,
+  DyadOAuthClientProvider,
+} from "./mcp_oauth_provider";
+import {
+  decryptFromString,
+  readServerSecretMap,
+  type ServerSecretRead,
+} from "./secret_storage";
+import { settleWithinTimeout } from "./promise_utils";
+import { syncVendoredOAuthClient } from "./vendored_oauth_client";
+
+// Connecting without a secret we know exists would talk to the server
+// unauthenticated, so refuse and point at the likely cause.
+function requireReadableSecret(
+  read: ServerSecretRead,
+  serverName: string,
+  label: string,
+): Record<string, string> | null {
+  if (read.status === "unreadable") {
+    throw new DyadError(
+      `Could not decrypt the ${label} for "${serverName}". This usually means the OS keyring is unavailable. Fix the keyring and try again, or re-enter the values.`,
+      DyadErrorKind.Precondition,
+    );
+  }
+  return read.value;
+}
+
+type ClientInitialization = {
+  cancelled: boolean;
+  promise: Promise<MCPClient>;
+};
+
+export type McpToolSet = Awaited<ReturnType<MCPClient["tools"]>>;
+
+const MCP_CLIENT_DISPOSAL_TIMEOUT_MS = 1_500;
+
+/** Default cap on connecting to one MCP server and listing its tools. */
+export const MCP_LIST_TOOLS_TIMEOUT_MS = 10_000;
+
+export class McpListToolsTimeoutError extends DyadError {
+  constructor(serverId: number, timeoutMs: number) {
+    super(
+      `Timed out after ${timeoutMs / 1000}s waiting for tools from server ${serverId}.`,
+      DyadErrorKind.Precondition,
+    );
+    this.name = "McpListToolsTimeoutError";
+  }
+}
+
+export class McpManager {
+  private static _instance: McpManager;
+  static get instance(): McpManager {
+    if (!this._instance) this._instance = new McpManager();
+    return this._instance;
+  }
+
+  private clients = new Map<number, MCPClient>();
+  private initializations = new Map<number, ClientInitialization>();
+  private disposals = new Map<number, Promise<void>>();
+  private disposeAllPromise: Promise<void> | undefined;
+
+  async getClient(serverId: number): Promise<MCPClient> {
+    while (true) {
+      const disposal = this.disposeAllPromise ?? this.disposals.get(serverId);
+      if (!disposal) break;
+      await disposal;
+    }
+
+    const existing = this.clients.get(serverId);
+    if (existing) return existing;
+
+    const existingInitialization = this.initializations.get(serverId);
+    if (existingInitialization) return existingInitialization.promise;
+
+    const initialization = {} as ClientInitialization;
+    initialization.cancelled = false;
+    initialization.promise = this.createClient(serverId)
+      .then(async (client) => {
+        if (initialization.cancelled) {
+          await Promise.allSettled([this.closeClient(client)]);
+          throw new DyadError(
+            `MCP client initialization cancelled for server ${serverId}`,
+            DyadErrorKind.Precondition,
+          );
+        }
+
+        // This should not normally be reachable because initialization promises
+        // are coalesced above. Keep the guard so a future cache mutation cannot
+        // leak a second transport or replace a client that is already in use.
+        const raceWinner = this.clients.get(serverId);
+        if (raceWinner) {
+          await Promise.allSettled([this.closeClient(client)]);
+          return raceWinner;
+        }
+
+        this.clients.set(serverId, client);
+        return client;
+      })
+      .finally(() => {
+        if (this.initializations.get(serverId) === initialization) {
+          this.initializations.delete(serverId);
+        }
+      });
+
+    this.initializations.set(serverId, initialization);
+    return initialization.promise;
+  }
+
+  /**
+   * Connect (or reuse the cached client) and list the server's tools, giving
+   * up after `timeoutMs` or when `signal` aborts. A server that accepts the
+   * connection but never answers (e.g. a wedged local desktop-app server)
+   * would otherwise block its caller forever.
+   *
+   * Giving up only stops waiting; it deliberately does not dispose the client.
+   * Disposing would kill a slow-starting stdio server (e.g. `npx` on a cold
+   * cache) mid-launch on every turn, and could close a client another chat is
+   * using for an in-flight tool call. A still-pending initialization stays
+   * coalesced, so a later call picks up the client once it finishes; each
+   * call still waits at most `timeoutMs`. Callers that own the server's
+   * lifecycle (settings edits) dispose explicitly.
+   */
+  async listToolsWithin(
+    serverId: number,
+    {
+      timeoutMs = MCP_LIST_TOOLS_TIMEOUT_MS,
+      signal,
+    }: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<McpToolSet> {
+    signal?.throwIfAborted();
+    const load = this.getClient(serverId).then((client) => client.tools());
+    // Keep a late rejection after timeout/abort from going unhandled.
+    load.catch(() => undefined);
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      return await new Promise<McpToolSet>((resolve, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new McpListToolsTimeoutError(serverId, timeoutMs)),
+          timeoutMs,
+        );
+        if (signal) {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+        load.then(resolve, reject);
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private async createClient(serverId: number): Promise<MCPClient> {
+    // Runs before the row is read so a refreshed client is picked up here,
+    // including on the silent token refresh path. Cached-only: building a
+    // client must not wait on a catalog fetch.
+    await syncVendoredOAuthClient(serverId, { cachedOnly: true });
+    const server = await db
+      .select()
+      .from(mcpServers)
+      .where(eq(mcpServers.id, serverId));
+    const s = server.find((x) => x.id === serverId);
+    if (!s) throw new Error(`MCP server not found: ${serverId}`);
+
+    let client: MCPClient;
+    if (s.transport === "stdio") {
+      const args = s.args ?? [];
+      const env =
+        requireReadableSecret(
+          readServerSecretMap(s.envEncrypted, s.envJson),
+          s.name,
+          "environment variables",
+        ) ?? undefined;
+      if (!s.command) throw new Error("MCP server command is required");
+      const stdio = new StdioClientTransport({
+        command: s.command,
+        args,
+        env,
+      });
+      client = await createMCPClient({ transport: stdio });
+    } else if (s.transport === "http") {
+      if (!s.url) throw new Error(`http MCP requires url`);
+      const authProvider = s.oauthEnabled
+        ? new DyadOAuthClientProvider({
+            serverId: s.id,
+            callbackPort: s.oauthCallbackPort ?? undefined,
+            scope: s.oauthScope ?? undefined,
+            preregisteredClientId: s.oauthClientId ?? undefined,
+            preregisteredClientSecret: s.oauthClientSecret
+              ? decryptFromString(s.oauthClientSecret) || undefined
+              : undefined,
+            writeAuthority: captureMcpOAuthWriteAuthority(s.id),
+          })
+        : undefined;
+      client = await createMCPClient({
+        transport: {
+          type: s.transport,
+          url: s.url,
+          headers:
+            requireReadableSecret(
+              readServerSecretMap(s.headersEncrypted, s.headersJson),
+              s.name,
+              "headers",
+            ) ?? undefined,
+          authProvider,
+        },
+      });
+    } else {
+      throw new DyadError(
+        `Unsupported MCP transport: ${s.transport}`,
+        DyadErrorKind.Validation,
+      );
+    }
+
+    return client;
+  }
+
+  private closeClient(client: MCPClient): Promise<void> {
+    return Promise.resolve().then(() => client.close());
+  }
+
+  dispose(serverId: number): Promise<void> {
+    const existingDisposal = this.disposals.get(serverId);
+    if (existingDisposal) return existingDisposal;
+
+    const initialization = this.initializations.get(serverId);
+    if (initialization) {
+      initialization.cancelled = true;
+      // Detach the cancelled initialization immediately. If startup itself is
+      // hung, a later getClient can retry after the bounded disposal window.
+      // Its eventual result still observes `cancelled` and closes itself.
+      this.initializations.delete(serverId);
+    }
+
+    // Delete from the cache before yielding so getClient cannot hand out a
+    // client once disposal has begun.
+    const client = this.clients.get(serverId);
+    this.clients.delete(serverId);
+
+    const disposal = settleWithinTimeout(
+      Promise.allSettled([
+        ...(client ? [this.closeClient(client)] : []),
+        ...(initialization ? [initialization.promise] : []),
+      ]),
+      MCP_CLIENT_DISPOSAL_TIMEOUT_MS,
+    ).finally(() => {
+      if (this.disposals.get(serverId) === disposal) {
+        this.disposals.delete(serverId);
+      }
+    });
+
+    this.disposals.set(serverId, disposal);
+    return disposal;
+  }
+
+  // Close every cached client. Server ids are only unique per database, so
+  // anything that swaps databases (the test harness) must clear the cache or
+  // a new server can silently reuse a stale client keyed to the same id.
+  // Best-effort per client (allSettled): one dead transport must not block
+  // closing the rest, and a rejection must not surface as an unhandled
+  // promise rejection.
+  disposeAll(): Promise<void> {
+    if (this.disposeAllPromise) return this.disposeAllPromise;
+
+    const serverIds = new Set([
+      ...this.clients.keys(),
+      ...this.initializations.keys(),
+      ...this.disposals.keys(),
+    ]);
+    const disposeAllPromise = Promise.allSettled(
+      [...serverIds].map((serverId) => this.dispose(serverId)),
+    )
+      .then(() => undefined)
+      .finally(() => {
+        if (this.disposeAllPromise === disposeAllPromise) {
+          this.disposeAllPromise = undefined;
+        }
+      });
+
+    this.disposeAllPromise = disposeAllPromise;
+    return disposeAllPromise;
+  }
+}
+
+export const mcpManager = McpManager.instance;

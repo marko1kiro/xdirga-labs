@@ -1,0 +1,11 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`security review (integration) > runs a security review and parses findings > security-review-dump 1`] = `
+"===
+role: system
+message: [[SYSTEM_MESSAGE]]
+
+===
+role: user
+message: /security-review"
+`;

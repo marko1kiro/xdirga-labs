@@ -1,0 +1,153 @@
+// Type definitions for Git operations
+export type GitCommit = {
+  oid: string;
+  commit: {
+    message: string;
+    author: {
+      timestamp: number;
+    };
+  };
+};
+export interface GitBaseParams {
+  path: string;
+}
+export interface GitCommitParams extends GitBaseParams {
+  message: string;
+  amend?: boolean;
+  /**
+   * Paths (relative to the repo root) to commit. When set, git makes a partial
+   * commit: it records the working-tree state of exactly these paths and leaves
+   * everything else staged in the index. Omit to commit the whole index.
+   */
+  paths?: string[];
+}
+export interface GitFileParams extends GitBaseParams {
+  filepath: string;
+}
+export interface GitListFilesParams extends GitBaseParams {
+  excludedFiles: string[];
+  excludedDirs: string[];
+}
+export interface GitCheckoutParams extends GitBaseParams {
+  ref: string;
+}
+export interface GitBranchRenameParams extends GitBaseParams {
+  oldBranch: string;
+  newBranch: string;
+}
+/**
+ * Credentials for git network operations, bound to the host they are for.
+ *
+ * Git receives them as an `http.<hostUrl>/.extraheader` config entry for the
+ * duration of one command, so they never reach `.git/config`. The basic-auth
+ * pair differs per provider: GitHub takes the token as the user name, GitLab
+ * takes it as the password of a fixed user.
+ */
+export interface GitRemoteAuth {
+  /** Origin, plus an optional path prefix, that the header applies to. */
+  hostUrl: string;
+  username: string;
+  password: string;
+}
+
+export interface GitCloneParams {
+  path: string; // destination
+  url: string;
+  depth?: number | null;
+  singleBranch?: boolean;
+  auth?: GitRemoteAuth;
+}
+export interface GitLogParams extends GitBaseParams {
+  depth?: number;
+  ref?: string;
+}
+
+export interface GitResult {
+  success: boolean;
+  error?: string;
+}
+export interface GitPushParams extends GitBaseParams {
+  branch: string;
+  auth: GitRemoteAuth;
+  force?: boolean;
+  forceWithLease?: boolean;
+}
+export interface GitFileAtCommitParams extends GitBaseParams {
+  filePath: string;
+  commitHash: string;
+}
+export type GitChangedFileType = "added" | "modified" | "deleted";
+export interface GitChangedFile {
+  path: string;
+  type: GitChangedFileType;
+}
+export interface GitListChangedFilesParams extends GitBaseParams {
+  commitHash: string;
+}
+export interface GitSetRemoteUrlParams extends GitBaseParams {
+  remoteUrl: string;
+}
+export interface GitInitParams extends GitBaseParams {
+  ref?: string; // branch name, default = "main"
+}
+export interface GitStageToRevertParams extends GitBaseParams {
+  targetOid: string;
+  onBeforeReset?: (progress: {
+    preRestoreHead: string;
+    targetHead: string;
+    nextStep: "hard-reset" | "soft-reset";
+  }) => void;
+}
+export interface GitAuthorParam {
+  name: string;
+  email: string;
+  timestamp?: number;
+  timezoneOffset?: number;
+}
+
+export interface GitFetchParams extends GitBaseParams {
+  remote?: string;
+  auth?: GitRemoteAuth;
+  /** Drop remote-tracking refs for branches that no longer exist on the remote. */
+  prune?: boolean;
+}
+
+export interface GitPullParams extends GitBaseParams {
+  remote?: string;
+  branch?: string;
+  auth?: GitRemoteAuth;
+  author?: GitAuthorParam;
+  rebase?: boolean;
+}
+
+export interface GitMergeParams extends GitBaseParams {
+  branch: string;
+  author?: GitAuthorParam;
+}
+
+export interface GitCreateBranchParams extends GitBaseParams {
+  branch: string;
+  from?: string;
+}
+
+export interface GitDeleteBranchParams extends GitBaseParams {
+  branch: string;
+}
+
+export type AgentGitDiffScope = "unstaged" | "staged" | "all";
+
+export interface AgentGitStatus {
+  branch: string | null;
+  head: string | null;
+  detached: boolean;
+  staged: string[];
+  unstaged: string[];
+  untracked: string[];
+  conflicted: string[];
+  truncated: boolean;
+}
+
+export interface AgentGitTextResult {
+  content: string;
+  truncated: boolean;
+}

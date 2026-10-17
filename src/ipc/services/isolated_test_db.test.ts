@@ -1,0 +1,1441 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { TestRunTiming } from "./test_run_timing";
+import { sendTelemetryEvent } from "../utils/telemetry";
+
+vi.mock("../utils/telemetry", () => ({ sendTelemetryEvent: vi.fn() }));
+
+const mocks = vi.hoisted(() => ({
+  createTempTestBranch: vi.fn(),
+  // The mark-then-delete tail lives in `neon_test_branch` and is tested there
+  // (`markAndDeleteTempTestBranch`), including the ordering it depends on. What
+  // teardown owes it is the branch it actually created — the app row it holds is
+  // stale by this point — so that is what these tests pin.
+  markAndDeleteTempTestBranch: vi.fn().mockResolvedValue(undefined),
+  trackedTestBranchId: vi.fn().mockResolvedValue(null),
+  createNeonTestAccount: vi.fn(),
+  clearNeonTestData: vi.fn().mockResolvedValue(undefined),
+  createNeonTestDataCleaner: vi.fn(),
+  getServiceRoleKey: vi.fn(),
+  ensureNeonAuthTrustedOrigin: vi.fn().mockResolvedValue(null),
+  ensureNeonAuthTrustedDomain: vi.fn().mockResolvedValue(null),
+  createTempTestUser: vi.fn(),
+  deleteTempTestUser: vi.fn().mockResolvedValue(true),
+  checkRls: vi.fn().mockResolvedValue({ tablesWithoutRls: [] }),
+  detectLegacyAppKey: vi.fn().mockResolvedValue(undefined),
+  getPublishableKey: vi.fn(),
+  updateNeonEnvVars: vi.fn().mockResolvedValue(undefined),
+  readEnvFileIfExists: vi.fn().mockResolvedValue(null),
+  executeApp: vi.fn().mockResolvedValue(undefined),
+  cleanUpPort: vi.fn().mockResolvedValue(undefined),
+  executeAlreadyLockedExternalRestart: vi.fn(
+    (
+      _appId: number,
+      execute: (context: {
+        invocationRef: {
+          kind: "app-run";
+          entityKey: number;
+          operationId: string;
+        };
+        output: object;
+      }) => Promise<unknown>,
+    ) =>
+      execute({
+        invocationRef: {
+          kind: "app-run",
+          entityKey: 1,
+          operationId: "isolated-restart",
+        },
+        output: {},
+      }),
+  ),
+  stopAppByInfo: vi.fn().mockResolvedValue(undefined),
+  runningApps: new Map<number, any>(),
+}));
+
+vi.mock("../utils/neon_test_branch", () => ({
+  createTempTestBranch: mocks.createTempTestBranch,
+  markAndDeleteTempTestBranch: mocks.markAndDeleteTempTestBranch,
+  trackedTestBranchId: mocks.trackedTestBranchId,
+}));
+vi.mock("../utils/neon_test_account", () => ({
+  createNeonTestAccount: mocks.createNeonTestAccount,
+}));
+vi.mock("../utils/neon_test_data", () => ({
+  createNeonTestDataCleaner: mocks.createNeonTestDataCleaner,
+}));
+vi.mock("../utils/neon_utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/neon_utils")>()),
+  ensureNeonAuthTrustedOrigin: mocks.ensureNeonAuthTrustedOrigin,
+  ensureNeonAuthTrustedDomain: mocks.ensureNeonAuthTrustedDomain,
+}));
+vi.mock("../../supabase_admin/supabase_context", () => ({
+  getPublishableKey: mocks.getPublishableKey,
+}));
+vi.mock("../utils/supabase_test_user", () => ({
+  createTempTestUser: mocks.createTempTestUser,
+  deleteTempTestUser: mocks.deleteTempTestUser,
+  checkRls: mocks.checkRls,
+  getServiceRoleKey: mocks.getServiceRoleKey,
+}));
+vi.mock("../../supabase_admin/supabase_app_key", () => ({
+  detectLegacyAppKey: mocks.detectLegacyAppKey,
+}));
+vi.mock("../utils/app_env_var_utils", () => ({
+  ENV_FILE_NAME: ".env.local",
+  getEnvFilePath: ({ appPath }: { appPath: string }) => `${appPath}/.env.local`,
+  readEnvFileIfExists: mocks.readEnvFileIfExists,
+  updateNeonEnvVars: mocks.updateNeonEnvVars,
+}));
+vi.mock("../utils/framework_utils", () => ({
+  detectFrameworkType: vi.fn(() => "nextjs"),
+}));
+vi.mock("../utils/process_manager", () => ({
+  runningApps: mocks.runningApps,
+  stopAppByInfo: mocks.stopAppByInfo,
+}));
+vi.mock("./app_runtime_service", () => ({
+  executeApp: mocks.executeApp,
+  cleanUpPort: mocks.cleanUpPort,
+}));
+vi.mock("./app_run_actor_service", () => ({
+  appRunActorService: {
+    executeAlreadyLockedExternalRestart:
+      mocks.executeAlreadyLockedExternalRestart,
+  },
+}));
+vi.mock("../../paths/paths", () => ({
+  getDyadAppPath: (p: string) => `/apps/${p}`,
+}));
+vi.mock("electron-log", () => ({
+  default: {
+    scope: () => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+    }),
+  },
+}));
+
+import { prepareIsolatedTestDatabase } from "./isolated_test_db";
+import { SupabaseTestUserCreationRejectedError } from "../utils/supabase_test_user_errors";
+
+const emit = vi.fn();
+
+function makeApp(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    path: "app1",
+    supabaseProjectId: null,
+    supabaseOrganizationSlug: null,
+    supabaseTestUserId: null,
+    neonProjectId: null,
+    installCommand: null,
+    startCommand: null,
+    ...overrides,
+  } as any;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.runningApps.clear();
+  mocks.checkRls.mockResolvedValue({ tablesWithoutRls: [] });
+  mocks.detectLegacyAppKey.mockResolvedValue(undefined);
+  mocks.readEnvFileIfExists.mockResolvedValue(null);
+  mocks.createTempTestUser.mockResolvedValue({
+    userId: "user-1",
+    email: "dyad-test+1@dyad.test",
+    password: "pw",
+    projectUrl: "https://sb-1.supabase.co",
+  });
+  mocks.deleteTempTestUser.mockResolvedValue(true);
+  mocks.getPublishableKey.mockResolvedValue("anon-key-123");
+  mocks.createNeonTestAccount.mockResolvedValue({
+    email: "neon-test@dyad.test",
+    password: "neon-pw",
+  });
+  mocks.ensureNeonAuthTrustedDomain.mockResolvedValue(null);
+  mocks.trackedTestBranchId.mockResolvedValue(null);
+  mocks.markAndDeleteTempTestBranch.mockResolvedValue(true);
+  mocks.deleteTempTestUser.mockResolvedValue(true);
+  mocks.clearNeonTestData.mockResolvedValue(undefined);
+  mocks.createNeonTestDataCleaner.mockResolvedValue(mocks.clearNeonTestData);
+  mocks.getServiceRoleKey.mockResolvedValue({
+    apiKey: "secret",
+    isLegacyJwt: false,
+  });
+});
+
+describe("per-case database isolation", () => {
+  it("authorizes sandbox Neon sign-in before provisioning fresh users per case", async () => {
+    const { prepareE2eTestDataIsolation } =
+      await import("./e2e_test_data_isolation");
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "temporary",
+      databaseUrl: "postgres://temporary",
+      neonAuthBaseUrl: "https://auth",
+    });
+    const prepared = await prepareE2eTestDataIsolation({
+      app: makeApp({ neonProjectId: "project" }),
+      workspacePath: "/sandboxes/run-1",
+      emit,
+      runtimeMode: "host",
+    });
+    expect(prepared.infraError).toBeUndefined();
+    expect(prepared.authSetup).toBeUndefined();
+    expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+    expect(prepared.authorizeRuntimeOrigin).toBeDefined();
+    await prepared.authorizeRuntimeOrigin!("http://127.0.0.1:52150");
+    expect(mocks.ensureNeonAuthTrustedOrigin).toHaveBeenCalledWith({
+      projectId: "project",
+      branchId: "temporary",
+      origin: "http://127.0.0.1:52150",
+    });
+    for (const email of ["first@dyad.test", "retry@dyad.test"]) {
+      mocks.createNeonTestAccount.mockResolvedValueOnce({
+        email,
+        password: "pw",
+      });
+      expect(await prepared.testCaseLifecycle!.beforeEach()).toEqual({
+        DYAD_TEST_USER_EMAIL: email,
+        DYAD_TEST_USER_PASSWORD: "pw",
+      });
+      await prepared.testCaseLifecycle!.afterEach();
+    }
+    expect(mocks.clearNeonTestData).toHaveBeenCalledTimes(4);
+    expect(mocks.updateNeonEnvVars).toHaveBeenCalledWith(
+      expect.objectContaining({ appPath: "/sandboxes/run-1" }),
+    );
+    await prepared.teardown();
+    expect(mocks.executeApp).not.toHaveBeenCalled();
+    expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+      expect.anything(),
+      "temporary",
+    );
+  });
+
+  const prepareSupabase = (timing?: TestRunTiming) =>
+    prepareIsolatedTestDatabase({
+      timing,
+      app: makeApp({
+        supabaseProjectId: "project",
+        supabaseOrganizationSlug: "org",
+      }),
+      emit,
+      runtimeMode: "host",
+      perTestCase: true,
+    });
+
+  it.each([
+    { apiKey: "sb_secret_fixture-key", isLegacyJwt: false },
+    { apiKey: "legacy-service-role-key", isLegacyJwt: true },
+  ])("supplies $apiKey only in the Node runner environment", async (key) => {
+    mocks.getServiceRoleKey.mockResolvedValueOnce(key);
+    const prepared = await prepareSupabase();
+
+    expect(prepared.testRunnerEnv).toEqual({
+      SUPABASE_SECRET_KEY: key.apiKey,
+      SUPABASE_URL: "https://project.supabase.co",
+    });
+    expect(mocks.getServiceRoleKey).toHaveBeenCalledWith({
+      projectId: "project",
+      organizationSlug: "org",
+    });
+    expect(prepared.testCredentials).toBeUndefined();
+    expect(prepared.authSetup).toBeUndefined();
+    const credentials = await prepared.testCaseLifecycle!.beforeEach();
+    expect(credentials).not.toHaveProperty("SUPABASE_SECRET_KEY");
+    expect(JSON.stringify(emit.mock.calls)).not.toContain(key.apiKey);
+    await prepared.teardown();
+  });
+
+  it("does not expose runner credentials when Supabase preparation fails", async () => {
+    mocks.getServiceRoleKey.mockRejectedValueOnce(new Error("key unavailable"));
+    const prepared = await prepareSupabase();
+
+    expect(prepared.infraError).toBeDefined();
+    expect(prepared.testRunnerEnv).toBeUndefined();
+    expect(prepared.testCaseLifecycle).toBeUndefined();
+    expect(mocks.createTempTestUser).not.toHaveBeenCalled();
+  });
+
+  it("creates a new Supabase user before every case and deletes it afterwards", async () => {
+    const timing = new TestRunTiming({ appId: 1, runId: 1, source: "panel" });
+    const prepared = await prepareSupabase(timing);
+    expect(mocks.createTempTestUser).not.toHaveBeenCalled();
+    expect(prepared.testCredentials).toBeUndefined();
+    const lifecycle = prepared.testCaseLifecycle!;
+    for (const userId of ["first", "second"]) {
+      mocks.createTempTestUser.mockResolvedValueOnce({
+        userId,
+        email: `${userId}@dyad.test`,
+        password: userId,
+        projectUrl: "https://project.supabase.co",
+      });
+      expect(await lifecycle.beforeEach()).toMatchObject({
+        DYAD_TEST_USER_EMAIL: `${userId}@dyad.test`,
+        DYAD_TEST_SUPABASE_ANON_KEY: "anon-key-123",
+      });
+      await lifecycle.afterEach();
+      expect(mocks.deleteTempTestUser).toHaveBeenLastCalledWith(
+        expect.objectContaining({ supabaseTestUserId: userId }),
+        expect.objectContaining({
+          adminKey: { apiKey: "secret", isLegacyJwt: false },
+        }),
+      );
+    }
+    await prepared.teardown();
+    expect(sendTelemetryEvent).not.toHaveBeenCalled();
+    timing.finish();
+    expect(sendTelemetryEvent).toHaveBeenCalledExactlyOnceWith(
+      "e2e_test_run_completed",
+      expect.objectContaining({
+        run_steps: [
+          { step: "database_setup", duration_ms: expect.any(Number) },
+          { step: "cleanup", duration_ms: expect.any(Number) },
+        ],
+      }),
+    );
+    expect(mocks.createTempTestUser).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timing }),
+    );
+    expect(mocks.deleteTempTestUser).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timing }),
+    );
+    expect(mocks.createTempTestUser).toHaveBeenCalledTimes(2);
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledTimes(2);
+    expect(mocks.getServiceRoleKey).toHaveBeenCalledTimes(1);
+    for (const [, options] of mocks.createTempTestUser.mock.calls) {
+      expect(options.adminKey).toEqual({
+        apiKey: "secret",
+        isLegacyJwt: false,
+      });
+    }
+  });
+
+  it("continues after verified default-user rejection and retries provisioning on later cases", async () => {
+    const prepared = await prepareSupabase();
+    const lifecycle = prepared.testCaseLifecycle!;
+    // A successful case first exercises cleanup before the rejected attempt.
+    await lifecycle.beforeEach();
+    mocks.createTempTestUser.mockRejectedValueOnce(
+      new SupabaseTestUserCreationRejectedError(),
+    );
+    expect(await lifecycle.beforeEach()).toEqual({});
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      expect.stringContaining("Continuing without default sign-in credentials"),
+      "running",
+    );
+    expect(prepared.testRunnerEnv).toEqual({
+      SUPABASE_SECRET_KEY: "secret",
+      SUPABASE_URL: "https://project.supabase.co",
+    });
+    await lifecycle.afterEach();
+    // No default user exists for the rejected attempt, so there's no deletion.
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledTimes(1);
+    expect(await lifecycle.beforeEach()).toMatchObject({
+      DYAD_TEST_USER_EMAIL: "dyad-test+1@dyad.test",
+    });
+    await lifecycle.afterEach();
+    expect(mocks.createTempTestUser).toHaveBeenCalledTimes(3);
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledTimes(2);
+    expect(await prepared.teardown()).toMatchObject({
+      remoteCleanupCompleted: true,
+    });
+  });
+
+  it.each([
+    new Error(
+      "Supabase rejected default test-user creation with a database error",
+    ),
+    new Error("invalid credentials"),
+    new TypeError("fetch failed"),
+    new DOMException("Request timed out", "TimeoutError"),
+  ])("propagates unclassified provisioning failures (%s)", async (error) => {
+    const prepared = await prepareSupabase();
+    mocks.createTempTestUser.mockRejectedValueOnce(error);
+    await expect(prepared.testCaseLifecycle!.beforeEach()).rejects.toBe(error);
+    expect(emit).not.toHaveBeenCalledWith(
+      expect.stringContaining("Continuing without default sign-in credentials"),
+      "running",
+    );
+    await prepared.teardown();
+  });
+
+  it.each(["run", "case"] as const)(
+    "keeps %s cancellation fatal after a verified rejection",
+    async (scope) => {
+      const controller = new AbortController();
+      const reason = new Error("stopped");
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({
+          supabaseProjectId: "project",
+          supabaseOrganizationSlug: "org",
+        }),
+        emit,
+        runtimeMode: "host",
+        perTestCase: true,
+        signal: scope === "run" ? controller.signal : undefined,
+      });
+      mocks.createTempTestUser.mockImplementationOnce(async () => {
+        controller.abort(reason);
+        throw new SupabaseTestUserCreationRejectedError();
+      });
+      await expect(
+        prepared.testCaseLifecycle!.beforeEach(
+          scope === "case" ? controller.signal : undefined,
+        ),
+      ).rejects.toBe(reason);
+      expect(emit).not.toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Continuing without default sign-in credentials",
+        ),
+        "running",
+      );
+      await prepared.teardown();
+    },
+  );
+
+  it("retains a failed Supabase deletion for retry and refuses to provision another user", async () => {
+    const prepared = await prepareSupabase();
+    await prepared.testCaseLifecycle!.beforeEach();
+    mocks.deleteTempTestUser.mockResolvedValue(false);
+    await expect(prepared.testCaseLifecycle!.afterEach()).rejects.toThrow(
+      "delete",
+    );
+    await expect(prepared.testCaseLifecycle!.beforeEach()).rejects.toThrow(
+      "delete",
+    );
+    expect(mocks.createTempTestUser).toHaveBeenCalledTimes(1);
+    mocks.deleteTempTestUser.mockResolvedValue(true);
+    await prepared.teardown();
+    expect(mocks.deleteTempTestUser).toHaveBeenLastCalledWith(
+      expect.objectContaining({ supabaseTestUserId: "user-1" }),
+      expect.objectContaining({
+        adminKey: { apiKey: "secret", isLegacyJwt: false },
+      }),
+    );
+  });
+
+  it("cleans up a Supabase user when a worker never ran its afterEach", async () => {
+    const prepared = await prepareSupabase();
+    await prepared.testCaseLifecycle!.beforeEach();
+    await prepared.teardown();
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledWith(
+      expect.objectContaining({ supabaseTestUserId: "user-1" }),
+      expect.objectContaining({
+        adminKey: { apiKey: "secret", isLegacyJwt: false },
+      }),
+    );
+  });
+
+  it.each([
+    [true, "localhost"],
+    [false, "localhost"],
+    [true, "app-1.localhost"],
+    [false, "app-1.localhost"],
+  ] as const)(
+    "resets only the temporary Neon database before and after cases (auth: %s, host: %s)",
+    async (withAuth, hostname) => {
+      mocks.createTempTestBranch.mockResolvedValue({
+        branchId: "temporary",
+        databaseUrl: "postgres://temporary",
+        ...(withAuth ? { neonAuthBaseUrl: "https://auth" } : {}),
+      });
+      mocks.runningApps.set(1, { proxyUrl: `http://${hostname}:42100` });
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response("ok"));
+      try {
+        const prepared = await prepareIsolatedTestDatabase({
+          app: makeApp({
+            neonProjectId: "project",
+            neonActiveBranchId: "active",
+            neonDevelopmentBranchId: "development",
+            neonPreviewBranchId: "preview",
+          }),
+          emit,
+          runtimeMode: "host",
+          perTestCase: true,
+        });
+        expect(prepared.infraError).toBeUndefined();
+        expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+        for (const email of ["first@dyad.test", "second@dyad.test"]) {
+          if (withAuth)
+            mocks.createNeonTestAccount.mockResolvedValueOnce({
+              email,
+              password: "pw",
+            });
+          const credentials = await prepared.testCaseLifecycle!.beforeEach();
+          expect(credentials).toEqual(
+            withAuth
+              ? { DYAD_TEST_USER_EMAIL: email, DYAD_TEST_USER_PASSWORD: "pw" }
+              : {},
+          );
+          await prepared.testCaseLifecycle!.afterEach();
+        }
+        expect(mocks.clearNeonTestData.mock.calls).toEqual(
+          Array.from({ length: 4 }, () => [undefined]),
+        );
+        expect(mocks.createNeonTestDataCleaner).toHaveBeenCalledWith(
+          expect.objectContaining({
+            databaseUrl: "postgres://temporary",
+            branchId: "temporary",
+            projectId: "project",
+            protectedBranchIds: ["active", "development", "preview"],
+          }),
+        );
+        expect(emit).toHaveBeenCalledWith(
+          expect.stringContaining("including the first test"),
+          "running",
+        );
+        if (withAuth) {
+          expect(mocks.ensureNeonAuthTrustedDomain).toHaveBeenCalledWith(
+            expect.objectContaining({
+              projectId: "project",
+              branchId: "temporary",
+              origin: `http://${hostname}:42100`,
+            }),
+          );
+          expect(
+            mocks.ensureNeonAuthTrustedDomain.mock.invocationCallOrder[0],
+          ).toBeLessThan(
+            mocks.createNeonTestAccount.mock.invocationCallOrder[0],
+          );
+          for (let index = 0; index < 2; index++) {
+            expect(
+              mocks.clearNeonTestData.mock.invocationCallOrder[index * 2],
+            ).toBeLessThan(
+              mocks.createNeonTestAccount.mock.invocationCallOrder[index],
+            );
+            expect(
+              mocks.createNeonTestAccount.mock.invocationCallOrder[index],
+            ).toBeLessThan(
+              mocks.clearNeonTestData.mock.invocationCallOrder[index * 2 + 1],
+            );
+          }
+        }
+        await prepared.teardown();
+        expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+          expect.anything(),
+          "temporary",
+        );
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+
+  it("does not create a Neon user when clearing copied data fails", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "temporary",
+      databaseUrl: "postgres://temporary",
+      neonAuthBaseUrl: "https://auth",
+    });
+    mocks.runningApps.set(1, { proxyUrl: "http://localhost:42100" });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok"));
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "project" }),
+        emit,
+        runtimeMode: "host",
+        perTestCase: true,
+      });
+      mocks.clearNeonTestData.mockRejectedValueOnce(
+        new Error("permission denied"),
+      );
+      await expect(prepared.testCaseLifecycle!.beforeEach()).rejects.toThrow(
+        "permission denied",
+      );
+      expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+      await prepared.teardown();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("prepareIsolatedTestDatabase — Supabase test-user path", () => {
+  // The test signs in through the app's own login UI, so a legacy key in the
+  // app's client is a failure waiting to happen — one that reads as broken
+  // login code rather than a retired key. Warn, and let the panel offer a fix.
+  //
+  // The warning travels as this flag rather than as prose in `reason`: the
+  // panel renders it in the user's own language and can retire it the moment
+  // the user takes the fix, neither of which a baked English sentence allows.
+  it("offers the switch when the app is on a legacy key", async () => {
+    mocks.detectLegacyAppKey.mockResolvedValue({
+      clientFilePath: "/apps/app1/src/integrations/supabase/client.ts",
+      legacyKey: "eyJ.legacy-anon",
+      publishableKey: "sb_publishable_abc",
+    });
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    expect(prepared.isolation.canSwitchToPublishableKey).toBe(true);
+    expect(prepared.isolation.reason).toBeUndefined();
+    // Warns, never blocks — the run still happens.
+    expect(prepared.infraError).toBeUndefined();
+    expect(mocks.createTempTestUser).toHaveBeenCalled();
+  });
+
+  // The two warnings are independent: RLS stays main-process prose, the
+  // legacy-key half is a flag the renderer owns. One must not swallow the other.
+  it("reports the legacy key and the RLS warning independently", async () => {
+    mocks.checkRls.mockResolvedValue({ tablesWithoutRls: ["todos"] });
+    mocks.detectLegacyAppKey.mockResolvedValue({
+      clientFilePath: "/apps/app1/src/integrations/supabase/client.ts",
+      legacyKey: "eyJ.legacy-anon",
+      publishableKey: "sb_publishable_abc",
+    });
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    expect(prepared.isolation.reason).toMatch(/Row-Level Security/);
+    expect(prepared.isolation.canSwitchToPublishableKey).toBe(true);
+  });
+
+  it("creates a test user and returns credentials when RLS is fully enabled", async () => {
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+    expect(mocks.createTempTestUser).toHaveBeenCalled();
+    expect(prepared.isolation.mode).toBe("supabase-test-user");
+    expect(prepared.isolation.reason).toBeUndefined();
+    expect(prepared.testRunnerEnv).toBeUndefined();
+    expect(prepared.testCredentials).toMatchObject({
+      DYAD_TEST_USER_EMAIL: "dyad-test+1@dyad.test",
+      DYAD_TEST_USER_PASSWORD: "pw",
+      DYAD_TEST_SUPABASE_URL: "https://sb-1.supabase.co",
+    });
+    expect(prepared.infraError).toBeUndefined();
+    expect(prepared.authorizeRuntimeOrigin).toBeUndefined();
+
+    await prepared.teardown();
+    expect(mocks.deleteTempTestUser).toHaveBeenCalledWith(
+      expect.objectContaining({ supabaseTestUserId: "user-1" }),
+    );
+  });
+
+  it("warns (but still isolates) when some tables lack RLS", async () => {
+    mocks.checkRls.mockResolvedValue({ tablesWithoutRls: ["posts", "todos"] });
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+    expect(prepared.isolation.mode).toBe("supabase-test-user");
+    expect(prepared.isolation.reason).toMatch(/posts, todos/);
+    expect(prepared.testCredentials).toBeDefined();
+    expect(prepared.infraError).toBeUndefined();
+  });
+
+  it("discloses without creating a user when no organization is connected", async () => {
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ supabaseProjectId: "sb-1" }),
+      emit,
+      runtimeMode: "host",
+    });
+    expect(prepared.isolation.mode).toBe("none");
+    expect(prepared.isolation.reason).toMatch(/Supabase organization/);
+    expect(mocks.createTempTestUser).not.toHaveBeenCalled();
+    expect(prepared.testRunnerEnv).toBeUndefined();
+  });
+
+  it.each([
+    new Error("supabase down"),
+    new SupabaseTestUserCreationRejectedError(),
+  ])(
+    "dead-ends recordings when test-user creation fails (%s)",
+    async (error) => {
+      mocks.createTempTestUser.mockRejectedValue(error);
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({
+          supabaseProjectId: "sb-1",
+          supabaseOrganizationSlug: "org-1",
+        }),
+        emit,
+        runtimeMode: "host",
+      });
+      expect(prepared.infraError).toBeDefined();
+      expect(prepared.infraError?.message).toMatch(
+        /real data was not touched/i,
+      );
+      expect(prepared.isolation.mode).toBe("none");
+      expect(prepared.testCredentials).toBeUndefined();
+    },
+  );
+});
+
+describe("prepareIsolatedTestDatabase — non-Neon paths", () => {
+  it("runs as-is with no reason for apps with no database", async () => {
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp(),
+      emit,
+      runtimeMode: "host",
+    });
+    expect(prepared.isolation).toEqual({ mode: "none" });
+    expect(prepared.testRunnerEnv).toBeUndefined();
+    expect(prepared.infraError).toBeUndefined();
+    expect(prepared.authorizeRuntimeOrigin).toBeUndefined();
+  });
+
+  it("discloses for non-host runtimes on a Neon app (no branch created)", async () => {
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ neonProjectId: "proj-1" }),
+      emit,
+      runtimeMode: "docker",
+    });
+    expect(prepared.isolation.mode).toBe("none");
+    expect(prepared.isolation.reason).toMatch(/docker/);
+    expect(mocks.createTempTestBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe("prepareIsolatedTestDatabase — Neon happy path", () => {
+  it.each([true, false])(
+    "clears copied data once before recording starts (auth: %s)",
+    async (withAuth) => {
+      mocks.createTempTestBranch.mockResolvedValue({
+        branchId: "temporary",
+        databaseUrl: "postgres://temporary",
+        ...(withAuth ? { neonAuthBaseUrl: "https://auth" } : {}),
+      });
+      mocks.runningApps.set(1, { proxyUrl: "http://localhost:42100" });
+      const signal = new AbortController().signal;
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response("ok"));
+      try {
+        const prepared = await prepareIsolatedTestDatabase({
+          app: makeApp({
+            neonProjectId: "project",
+            neonActiveBranchId: "active",
+            neonDevelopmentBranchId: "development",
+            neonPreviewBranchId: "preview",
+          }),
+          emit,
+          runtimeMode: "host",
+          signal,
+        });
+
+        expect(prepared.infraError).toBeUndefined();
+        expect(prepared.isolation).toEqual({ mode: "neon-branch" });
+        expect(prepared.testCaseLifecycle).toBeUndefined();
+        expect(mocks.createNeonTestDataCleaner).toHaveBeenCalledWith({
+          databaseUrl: "postgres://temporary",
+          branchId: "temporary",
+          projectId: "project",
+          protectedBranchIds: ["active", "development", "preview"],
+        });
+        expect(mocks.clearNeonTestData.mock.calls).toEqual([[signal]]);
+        if (withAuth) {
+          expect(
+            mocks.clearNeonTestData.mock.invocationCallOrder[0],
+          ).toBeLessThan(
+            mocks.createNeonTestAccount.mock.invocationCallOrder[0],
+          );
+          expect(prepared.authSetup).toEqual({
+            mode: "neon-better-auth",
+            email: "neon-test@dyad.test",
+            password: "neon-pw",
+          });
+        } else {
+          expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+          expect(prepared.authSetup).toBeUndefined();
+        }
+
+        await prepared.teardown();
+        expect(mocks.clearNeonTestData).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+
+  it("stops recording setup and restores the preview when clearing copied data fails", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "temporary",
+      databaseUrl: "postgres://temporary",
+      neonAuthBaseUrl: "https://auth",
+    });
+    mocks.clearNeonTestData.mockRejectedValueOnce(
+      new Error("permission denied"),
+    );
+    mocks.runningApps.set(1, { proxyUrl: "http://localhost:42100" });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok"));
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "project" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(prepared.infraError?.message).toContain("permission denied");
+      expect(prepared.isolation.mode).toBe("none");
+      expect(prepared.authSetup).toBeUndefined();
+      expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+      expect(mocks.executeApp).toHaveBeenCalledTimes(2);
+      expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 1 }),
+        "temporary",
+      );
+      expect(await prepared.teardown()).toEqual({
+        envRestored: true,
+        remoteCleanupCompleted: true,
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("targets a sandbox without restarting or marking the real env as swapped", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+    });
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ neonProjectId: "proj-1" }),
+      emit,
+      runtimeMode: "host",
+      appPathOverride: "/sandboxes/run-1",
+      restartApp: false,
+    });
+
+    expect(prepared.infraError).toBeUndefined();
+    expect(mocks.updateNeonEnvVars).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appPath: "/sandboxes/run-1",
+        connectionUri: "postgres://temp",
+      }),
+    );
+    // The marker is asked for at creation, not written afterwards: everything
+    // between (Neon Auth provisioning, the cookie secret, their backoff) takes
+    // seconds, and a crash in that window would leave a raw marker that startup
+    // recovery reads as the recorder's env swap and "restores" by rewriting the
+    // user's real `.env.local`.
+    expect(mocks.createTempTestBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1 }),
+      // The sandbox path is also what Neon Auth detection has to read: the live
+      // project's `.env.local` can have moved on since the capture.
+      { cleanupOnly: true, appPathOverride: "/sandboxes/run-1" },
+    );
+    expect(mocks.executeApp).not.toHaveBeenCalled();
+    await prepared.teardown();
+    expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1 }),
+      "test-br",
+    );
+  });
+
+  it("deletes the branch without restoring live credentials into a retained sandbox", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+    });
+    mocks.readEnvFileIfExists.mockResolvedValue(
+      "DATABASE_URL=postgres://live\n",
+    );
+    mocks.markAndDeleteTempTestBranch.mockResolvedValue(true);
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "dyad-isolation-"));
+    const envPath = path.join(sandbox, ".env.local");
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+        appPathOverride: sandbox,
+        restartApp: false,
+      });
+      expect(prepared.infraError).toBeUndefined();
+      // Stand in for the mocked updateNeonEnvVars write. A surviving process
+      // can keep reading this file after teardown when disposal is deferred.
+      fs.writeFileSync(envPath, "DATABASE_URL=postgres://temp\n");
+      const result = await prepared.teardown();
+      expect(result.envRestored).toBe(true);
+      expect(result.remoteCleanupCompleted).toBe(true);
+      expect(fs.readFileSync(envPath, "utf8")).toBe(
+        "DATABASE_URL=postgres://temp\n",
+      );
+      expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 1 }),
+        "test-br",
+      );
+      expect(mocks.executeApp).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("checks the direct dev server instead of the HTML-rewriting proxy", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    mocks.runningApps.set(1, {
+      processId: 42,
+      originalUrl: "http://localhost:32100",
+      proxyUrl: "http://app-1.localhost:42100",
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "http://localhost:32100") {
+          return new Response("ok");
+        }
+        throw new Error(`Proxy response could not be parsed: ${url}`);
+      });
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(prepared.infraError).toBeUndefined();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "http://localhost:32100",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(fetchSpy).not.toHaveBeenCalledWith(
+        "http://app-1.localhost:42100",
+        expect.anything(),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("creates a branch, swaps env, restarts, and reports neon-branch", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    // Server comes up immediately.
+    mocks.runningApps.set(1, {
+      proxyUrl: "http://app-1.localhost:42100",
+    });
+    // try/finally so a failing assertion can't leak the mocked fetch into
+    // other tests (vi.clearAllMocks in beforeEach doesn't restore spies).
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok"));
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(mocks.createTempTestBranch).toHaveBeenCalled();
+      expect(mocks.updateNeonEnvVars).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionUri: "postgres://temp" }),
+      );
+      expect(mocks.executeApp).toHaveBeenCalled();
+      expect(mocks.executeAlreadyLockedExternalRestart).toHaveBeenCalledWith(
+        1,
+        expect.any(Function),
+      );
+      expect(mocks.executeApp).toHaveBeenCalledWith(
+        expect.objectContaining({
+          neonAuthTarget: { projectId: "proj-1", branchId: "test-br" },
+          output: {},
+          invocationRef: {
+            kind: "app-run",
+            entityKey: 1,
+            operationId: "isolated-restart",
+          },
+        }),
+      );
+      expect(prepared.isolation).toEqual({ mode: "neon-branch" });
+      expect(prepared.infraError).toBeUndefined();
+
+      // Teardown deletes the branch we created (row is stale, so it's passed in).
+      await prepared.teardown();
+      expect(mocks.executeApp).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          neonAuthTarget: undefined,
+          previewAbortSignal: undefined,
+        }),
+      );
+      expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 1 }),
+        "test-br",
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("keeps the branch tracked when restoring .env.local fails", async () => {
+    mocks.readEnvFileIfExists.mockResolvedValue("POSTGRES_URL=real\n");
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    mocks.runningApps.set(1, { proxyUrl: "http://app-1.localhost:42100" });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok"));
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      mocks.markAndDeleteTempTestBranch.mockClear();
+      mocks.executeApp.mockClear();
+      emit.mockClear();
+
+      await prepared.teardown();
+
+      expect(mocks.executeApp).not.toHaveBeenCalled();
+      expect(mocks.markAndDeleteTempTestBranch).not.toHaveBeenCalled();
+      expect(emit).toHaveBeenCalledWith(
+        expect.stringMatching(/temporary Neon branch was kept tracked/i),
+        "setup",
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("dead-ends (infraError) and restores when branch creation fails", async () => {
+    mocks.createTempTestBranch.mockRejectedValue(new Error("neon down"));
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ neonProjectId: "proj-1" }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    expect(prepared.infraError).toBeDefined();
+    expect(prepared.infraError?.message).toMatch(/real data was not touched/i);
+    expect(prepared.isolation.mode).toBe("none");
+    // Branch creation failed before the env was swapped, so there is nothing to
+    // restore — teardown correctly skips the restart (no executeApp call).
+    expect(mocks.executeApp).not.toHaveBeenCalled();
+  });
+});
+
+describe("prepareIsolatedTestDatabase — auth provisioning", () => {
+  function withServerUp() {
+    mocks.runningApps.set(1, { proxyUrl: "http://app-1.localhost:42100" });
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+  }
+
+  it.each(["localhost", "app-1.localhost"])(
+    "provisions a Neon Better Auth account on %s when the branch has auth",
+    async (hostname) => {
+      mocks.createTempTestBranch.mockResolvedValue({
+        branchId: "test-br",
+        databaseUrl: "postgres://temp",
+        neonAuthBaseUrl: "https://auth",
+        cookieSecret: "secret",
+      });
+      const fetchSpy = withServerUp();
+      mocks.runningApps.set(1, { proxyUrl: `http://${hostname}:42100` });
+      const signal = new AbortController().signal;
+      try {
+        const prepared = await prepareIsolatedTestDatabase({
+          app: makeApp({ neonProjectId: "proj-1" }),
+          emit,
+          runtimeMode: "host",
+          signal,
+        });
+
+        expect(mocks.createNeonTestAccount).toHaveBeenCalledWith({
+          neonAuthBaseUrl: "https://auth",
+          appId: 1,
+        });
+        expect(mocks.ensureNeonAuthTrustedDomain).toHaveBeenCalledWith({
+          projectId: "proj-1",
+          branchId: "test-br",
+          origin: `http://${hostname}:42100`,
+          signal: expect.any(AbortSignal),
+        });
+        expect(
+          mocks.ensureNeonAuthTrustedDomain.mock.invocationCallOrder[0],
+        ).toBeLessThan(mocks.createNeonTestAccount.mock.invocationCallOrder[0]);
+        expect(prepared.testCredentials).toEqual({
+          DYAD_TEST_USER_EMAIL: "neon-test@dyad.test",
+          DYAD_TEST_USER_PASSWORD: "neon-pw",
+        });
+        expect(prepared.authSetup).toEqual({
+          mode: "neon-better-auth",
+          email: "neon-test@dyad.test",
+          password: "neon-pw",
+        });
+        await prepared.authorizeRuntimeOrigin?.("http://127.0.0.1:49999");
+        expect(mocks.ensureNeonAuthTrustedOrigin).toHaveBeenCalledWith({
+          projectId: "proj-1",
+          branchId: "test-br",
+          origin: "http://127.0.0.1:49999",
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+
+  it("trusts the preview origin before handing the recorder credentials", async () => {
+    // The temporary branch has its own Neon Auth configuration and does not
+    // inherit the development branch's trusted origins, so an account created
+    // without this can be signed into from nowhere.
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    const fetchSpy = withServerUp();
+    try {
+      await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(mocks.ensureNeonAuthTrustedDomain).toHaveBeenCalledWith({
+        projectId: "proj-1",
+        branchId: "test-br",
+        origin: "http://app-1.localhost:42100",
+        signal: expect.any(AbortSignal),
+      });
+      // The ordering is the point: an account provisioned before its origin is
+      // trusted can be signed into from nowhere, and asserting only that both
+      // ran would pass on the reordered version.
+      expect(
+        mocks.ensureNeonAuthTrustedDomain.mock.invocationCallOrder[0],
+      ).toBeLessThan(mocks.createNeonTestAccount.mock.invocationCallOrder[0]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("does not ask a sandboxed run for a preview origin it never uses", async () => {
+    // A sandboxed run never starts the preview, so `proxyUrl` is legitimately
+    // absent. Demanding it would throw into the best-effort catch and silently
+    // drop sign-in for every auth-gated spec; the run registers the origin it
+    // actually serves on through `authorizeRuntimeOrigin` instead.
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ neonProjectId: "proj-1" }),
+      emit,
+      runtimeMode: "host",
+      appPathOverride: "/sandbox/app",
+      restartApp: false,
+    });
+
+    expect(mocks.ensureNeonAuthTrustedDomain).not.toHaveBeenCalled();
+    expect(prepared.testCredentials).toEqual({
+      DYAD_TEST_USER_EMAIL: "neon-test@dyad.test",
+      DYAD_TEST_USER_PASSWORD: "neon-pw",
+    });
+  });
+
+  it("reports the branch a failed setup left tracked on the row", async () => {
+    // `createTempTestBranch` persists its marker before the provisioning that
+    // can still fail, so a failure after that point leaves the row tracking a
+    // real branch the caller never got an id for. Reporting the run as having
+    // left nothing behind would drop the user's only warning about it.
+    mocks.createTempTestBranch.mockRejectedValue(new Error("auth blocked"));
+    mocks.trackedTestBranchId.mockResolvedValue("dyad-cleanup-only:v1:leaked");
+    mocks.markAndDeleteTempTestBranch.mockResolvedValue(false);
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({ neonProjectId: "proj-1" }),
+      emit,
+      runtimeMode: "host",
+      appPathOverride: "/sandboxes/run-1",
+      restartApp: false,
+    });
+
+    expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1 }),
+      "dyad-cleanup-only:v1:leaked",
+    );
+    await expect(prepared.teardown()).resolves.toMatchObject({
+      remoteCleanupCompleted: false,
+    });
+  });
+
+  it("never adopts a marker a previous session left on the row", async () => {
+    // Two failure paths throw with the row untouched: the prior-cleanup
+    // dead-end, and the refusal to take a row that still holds a raw marker.
+    // Adopting there would hand teardown a PREVIOUS session's marker, which it
+    // would relabel cleanup-only and delete — erasing the one signal that a
+    // crashed recorder left the user's real `.env.local` pointing at it.
+    mocks.createTempTestBranch.mockRejectedValue(new Error("refused"));
+    mocks.trackedTestBranchId.mockResolvedValue("leaked-from-last-session");
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        neonProjectId: "proj-1",
+        neonTestBranchId: "leaked-from-last-session",
+      }),
+      emit,
+      runtimeMode: "host",
+      appPathOverride: "/sandboxes/run-1",
+      restartApp: false,
+    });
+
+    expect(mocks.markAndDeleteTempTestBranch).not.toHaveBeenCalled();
+    await expect(prepared.teardown()).resolves.toMatchObject({
+      remoteCleanupCompleted: true,
+    });
+  });
+
+  it("does not authorize an origin nothing will sign in from", async () => {
+    // The runner treats a failed authorization as fatal. With no credentials
+    // there is no sign-in to enable, so a Neon hiccup here would take down a
+    // run of specs that never touch auth.
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    mocks.createNeonTestAccount.mockRejectedValue(new Error("signup blocked"));
+    const fetchSpy = withServerUp();
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(prepared.authSetup).toBeUndefined();
+      expect(prepared.authorizeRuntimeOrigin).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("continues unauthenticated when Neon account provisioning fails", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    mocks.createNeonTestAccount.mockRejectedValue(new Error("signup blocked"));
+    const fetchSpy = withServerUp();
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      // Still isolated (never dead-ends on best-effort auth), just no auth.
+      expect(prepared.isolation).toEqual({ mode: "neon-branch" });
+      expect(prepared.infraError).toBeUndefined();
+      expect(prepared.testCredentials).toBeUndefined();
+      expect(prepared.authSetup).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("fails setup and tears down when the preview origin cannot be trusted", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      neonAuthBaseUrl: "https://auth",
+      cookieSecret: "secret",
+    });
+    mocks.ensureNeonAuthTrustedDomain.mockRejectedValue(
+      new Error("trusted domain rejected"),
+    );
+    const fetchSpy = withServerUp();
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(prepared.isolation.mode).toBe("none");
+      expect(prepared.infraError?.message).toContain("trusted domain rejected");
+      expect(mocks.markAndDeleteTempTestBranch).toHaveBeenCalled();
+      expect(prepared.testCredentials).toBeUndefined();
+      expect(prepared.authSetup).toBeUndefined();
+      expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("skips account provisioning for a Neon app without Neon Auth", async () => {
+    mocks.createTempTestBranch.mockResolvedValue({
+      branchId: "test-br",
+      databaseUrl: "postgres://temp",
+      // No neonAuthBaseUrl → the app doesn't use Neon Auth.
+    });
+    const fetchSpy = withServerUp();
+    try {
+      const prepared = await prepareIsolatedTestDatabase({
+        app: makeApp({ neonProjectId: "proj-1" }),
+        emit,
+        runtimeMode: "host",
+      });
+
+      expect(mocks.createNeonTestAccount).not.toHaveBeenCalled();
+      expect(prepared.authSetup).toBeUndefined();
+      expect(prepared.authorizeRuntimeOrigin).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("includes the Supabase anon key and authSetup when it can be fetched", async () => {
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    expect(mocks.getPublishableKey).toHaveBeenCalledWith({
+      projectId: "sb-1",
+      organizationSlug: "org-1",
+    });
+    expect(prepared.testCredentials).toMatchObject({
+      DYAD_TEST_SUPABASE_ANON_KEY: "anon-key-123",
+    });
+    expect(prepared.authSetup).toEqual({
+      mode: "supabase-password",
+      email: "dyad-test+1@dyad.test",
+      password: "pw",
+      projectUrl: "https://sb-1.supabase.co",
+      anonKey: "anon-key-123",
+    });
+  });
+
+  it("reports a leaked test user when the delete quietly fails", async () => {
+    // `deleteTempTestUser` is best-effort inside: a 5xx from the Auth Admin API
+    // resolves `false` and deliberately leaves the id on the row for the
+    // startup sweep. Reading only the throw reported a clean teardown for a
+    // test user still sitting in the user's real project.
+    mocks.deleteTempTestUser.mockResolvedValue(false);
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    await expect(prepared.teardown()).resolves.toMatchObject({
+      envRestored: true,
+      remoteCleanupCompleted: false,
+    });
+  });
+
+  it("carries the teardown verdict through a setup failure", async () => {
+    // A Stop pressed just after the test user was created runs teardown inside
+    // the catch. Handing back a NOOP teardown afterwards answers "nothing left
+    // over" and reports a clean cancellation for a user that leaked.
+    mocks.deleteTempTestUser.mockResolvedValue(false);
+    const stop = new AbortController();
+    mocks.createTempTestUser.mockImplementation(async () => {
+      stop.abort();
+      return {
+        userId: "user-1",
+        email: "dyad-test+1@dyad.test",
+        password: "pw",
+        projectUrl: "https://sb-1.supabase.co",
+      };
+    });
+
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+      signal: stop.signal,
+    });
+
+    expect(prepared.infraError?.message).toBe("Test run stopped.");
+    await expect(prepared.teardown()).resolves.toMatchObject({
+      remoteCleanupCompleted: false,
+    });
+  });
+
+  it("continues unauthenticated when the Supabase anon key can't be fetched", async () => {
+    mocks.getPublishableKey.mockRejectedValue(new Error("no key"));
+    const prepared = await prepareIsolatedTestDatabase({
+      app: makeApp({
+        supabaseProjectId: "sb-1",
+        supabaseOrganizationSlug: "org-1",
+      }),
+      emit,
+      runtimeMode: "host",
+    });
+
+    // Still isolated via the test user; just no programmatic sign-in.
+    expect(prepared.isolation.mode).toBe("supabase-test-user");
+    expect(prepared.authSetup).toBeUndefined();
+    expect(prepared.testCredentials).not.toHaveProperty(
+      "DYAD_TEST_SUPABASE_ANON_KEY",
+    );
+    expect(prepared.testCredentials).toMatchObject({
+      DYAD_TEST_USER_EMAIL: "dyad-test+1@dyad.test",
+    });
+  });
+});
