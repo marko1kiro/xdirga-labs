@@ -11,6 +11,7 @@ import {
 } from "./external_model_admission";
 import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
 import { getAutoSidekickRuntimeModel } from "@/lib/autoSidekick";
+import { getLanguageModelProviders } from "../shared/language_model_helpers";
 import { shouldBillChatGPTSubscription } from "./subscription_billing";
 import {
   AUTO_BALANCED_ALIAS,
@@ -18,6 +19,27 @@ import {
   resolveAutoModelCandidate,
   type AutoModelCandidates,
 } from "./auto_model_candidates";
+
+/**
+ * Custom providers bill through the user's own gateway, not Dyad, so they
+ * never need a Dyad Pro key or Dyad admission. A Dyad-routed (non-custom)
+ * selection still needs both.
+ */
+export async function selectionsNeedDyadAdmission(
+  selections: ModelSelection[],
+  settings: UserSettings,
+): Promise<boolean> {
+  const providers = await getLanguageModelProviders();
+  return selections.some((selection) => {
+    const isGateTrigger =
+      (selection.connection === "subscription" &&
+        shouldBillChatGPTSubscription(settings)) ||
+      selection.connection === "api-key";
+    if (!isGateTrigger) return false;
+    const provider = providers.find((p) => p.id === selection.provider);
+    return provider?.type !== "custom";
+  });
+}
 
 /** Resolve once before durable acceptance. In-flight turns keep this selection. */
 export async function preflightSubscriptionTurn(
@@ -75,12 +97,19 @@ export async function preflightSubscriptionTurn(
     )
   ) {
     const apiKey = settings.providerSettings?.auto?.apiKey?.value;
-    if (!apiKey)
+    if (apiKey) {
+      externalModelAdmission = await checkExternalModelAdmission(
+        apiKey,
+        signal,
+      );
+    } else if (await selectionsNeedDyadAdmission(selections, settings)) {
       throw new DyadError(
         "Connect Dyad Pro before using an external model.",
         DyadErrorKind.Auth,
       );
-    externalModelAdmission = await checkExternalModelAdmission(apiKey, signal);
+    }
+    // Else: every triggering selection is a custom provider, whose billing
+    // runs through the user's own gateway — no Dyad key or admission needed.
   }
   signal.throwIfAborted();
   return { model: resolved, externalModelAdmission };
