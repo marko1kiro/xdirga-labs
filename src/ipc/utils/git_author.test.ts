@@ -25,7 +25,7 @@ describe("getGitAuthor", () => {
 
   it("falls back to Dyad's own address when no provider is connected", async () => {
     expect(await getGitAuthor()).toEqual({
-      name: "Dyad",
+      name: "XDIRGA LABS",
       email: "git@dyad.sh",
     });
   });

@@ -5,14 +5,14 @@ export const SUBSCRIPTION_BILLING_ERRORS = {
     title: "You’re out of AI credits",
     description: "Add credits to continue using Pro features.",
     message:
-      "You're out of Dyad credits. Add credits to continue using Pro features.",
+      "You're out of XDIRGA LABS credits. Add credits to continue using Pro features.",
     action: "Get more credits",
     url: "https://academy.dyad.sh/subscription",
   },
   KEY_REJECTED: {
-    title: "Your Dyad Pro key was rejected",
+    title: "Your XDIRGA LABS Pro key was rejected",
     description: "Get your current Pro key.",
-    message: "Your Dyad Pro key was rejected. Get your current Pro key.",
+    message: "Your XDIRGA LABS Pro key was rejected. Get your current Pro key.",
     action: "Open membership portal",
     url: "https://academy.dyad.sh",
   },

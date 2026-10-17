@@ -72,9 +72,12 @@ jobs:
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
+      # Shard 4 OOMed at 4GB after only 35 files with 4 parallel workers
+      # (parallel workers multiply peak memory). Run it sequentially so
+      # peak memory is one worker, not four.
       - name: Unit tests (shard 4/4)
         if: always()
-        run: npx vitest run --shard=4/4
+        run: npx vitest run --shard=4/4 --maxWorkers=1
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
