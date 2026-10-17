@@ -254,7 +254,7 @@ describe("buildIssueBody", () => {
       diagnostics,
       sessionId: null,
     });
-    expect(shared).toContain("- Dyad Version: 1.2.3");
+    expect(shared).toContain("- XDIRGA LABS Version: 1.2.3");
     expect(shared).toContain("## Logs");
 
     const withheld = buildIssueBody({
@@ -266,7 +266,7 @@ describe("buildIssueBody", () => {
     expect(withheld).toContain(
       "## System Information\nNot included by the reporter.",
     );
-    expect(withheld).not.toContain("- Dyad Version");
+    expect(withheld).not.toContain("- XDIRGA LABS Version");
     expect(withheld).not.toContain("## Logs");
   });
 
