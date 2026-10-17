@@ -48,38 +48,41 @@ jobs:
       # The node --test scripts from `npm run test` (quick, no OOM).
       - name: Node script tests
         run: node --test scripts/promote-previous-beta.test.mjs scripts/start-supervisor.test.mjs scripts/copy-data-to-dev.test.mjs scripts/unauthorized-release-alert.test.mjs scripts/pr-review/validate-review.test.mjs scripts/issue-triage/triage-comment.test.mjs scripts/issue-triage/prepare-context.test.mjs
-      # Vitest sharded: a single vitest run OOMs even at 4GB heap (a worker
-      # accumulates memory across files and hits the limit after all tests
-      # pass). Sharding splits the suite so each shard runs a quarter of
-      # the files in a fresh process. Standard for large suites, not a leak
-      # workaround: each shard must pass on its own, and 0 test failures
-      # is still required. Shard 2/2 OOMed at 4GB after only 65 files, so
-      # 2 shards is not enough — 4 shards splits the heavy half further.
+      # Vitest sharded (unit project only): a single vitest run OOMs even
+      # at 4GB heap (a worker accumulates memory across files and hits the
+      # limit after all tests pass). Sharding splits the suite so each
+      # shard runs a quarter of the files in a fresh process. Standard for
+      # large suites, not a leak workaround: each shard must pass on its
+      # own, and 0 test failures is still required. Shard 2/2 OOMed at 4GB
+      # after only 65 files, so 2 shards is not enough — 4 shards splits
+      # the heavy half further.
       - name: Unit tests (shard 1/4)
-        run: npx vitest run --shard=1/4
+        run: npx vitest run --project=unit --shard=1/4
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
       - name: Unit tests (shard 2/4)
         if: always()
-        run: npx vitest run --shard=2/4
+        run: npx vitest run --project=unit --shard=2/4
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
       - name: Unit tests (shard 3/4)
         if: always()
-        run: npx vitest run --shard=3/4
+        run: npx vitest run --project=unit --shard=3/4
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
-      # Shard 4 OOMed at 4GB after only 21 files even sequentially
-      # (maxWorkers=1), so a single file in this shard leaks to 4GB by
-      # itself. Run it in forks pool: each file gets its own process, so
-      # a leaking file kills only its fork and Vitest reports which file
-      # it was, instead of crashing the whole shard.
       - name: Unit tests (shard 4/4)
         if: always()
-        run: npx vitest run --shard=4/4 --pool=forks --maxWorkers=1
+        run: npx vitest run --project=unit --shard=4/4
+      # Integration tests run separately from unit shards: they use a real
+      # DB + fake LLM server and are far heavier (one integration file,
+      # chat_mode, OOMed the mixed shard at 4GB). Forks pool + sequential
+      # keeps each integration file in its own process.
+      - name: Integration tests
+        if: always()
+        run: npx vitest run --project=integration --pool=forks --maxWorkers=1
         env:
           NODE_OPTIONS: --no-deprecation --max-old-space-size=4096
           VITE_CJS_IGNORE_WARNING: "true"
