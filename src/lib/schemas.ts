@@ -740,10 +740,7 @@ export function isDyadProEnabled(settings: UserSettings): boolean {
   // UNLOCKED for personal use: always Pro in the app.
   // Under Vitest, respect the original logic so free-user tests keep
   // exercising the non-Pro paths.
-  if (
-    process.env.VITEST === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
+  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
     return settings.enableDyadPro === true && hasDyadProKey(settings);
   }
   return true;
@@ -752,10 +749,7 @@ export function isDyadProEnabled(settings: UserSettings): boolean {
 export function hasDyadProKey(settings: UserSettings): boolean {
   // UNLOCKED for personal use: always report Pro key present in the app.
   // Under Vitest, use the original logic so tests can cover both states.
-  if (
-    process.env.VITEST === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
+  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
     return !!settings.providerSettings?.auto?.apiKey?.value;
   }
   return true;
