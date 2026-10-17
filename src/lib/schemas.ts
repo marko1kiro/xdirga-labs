@@ -736,13 +736,13 @@ export function migrateStoredSettings(
   };
 }
 
-export function isDyadProEnabled(settings: UserSettings): boolean {
+export function isDyadProEnabled(_settings: UserSettings): boolean {
   // UNLOCKED: always treat as Pro for personal use
   return true;
   // original: return settings.enableDyadPro === true && hasDyadProKey(settings);
 }
 
-export function hasDyadProKey(settings: UserSettings): boolean {
+export function hasDyadProKey(_settings: UserSettings): boolean {
   // UNLOCKED: always report Pro key present
   return true;
   // original: return !!settings.providerSettings?.auto?.apiKey?.value;
