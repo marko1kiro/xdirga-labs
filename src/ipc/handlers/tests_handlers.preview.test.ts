@@ -990,7 +990,7 @@ describe("preview runs", () => {
     expect(lastSpawn().args).not.toContain("--headed");
   });
 
-  it("keeps Playwright's own recorders off Dyad's windows", async () => {
+  it("keeps Playwright's own recorders off XDIRGA LABS windows", async () => {
     const rotatePreviewView = mockPreviewBatch();
 
     await runAppTestsCore({

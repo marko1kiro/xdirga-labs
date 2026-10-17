@@ -235,7 +235,7 @@ export function registerGitLabHandlers() {
       if (info && !info.scopes.includes(GITLAB_REQUIRED_SCOPE)) {
         throw new DyadError(
           `This access token has the scopes ${info.scopes.join(", ") || "(none)"}, ` +
-            `but Dyad needs the ${GITLAB_REQUIRED_SCOPE} scope to create projects, ` +
+            `but XDIRGA LABS needs the ${GITLAB_REQUIRED_SCOPE} scope to create projects, ` +
             "list groups and add deploy keys. Create a token with that scope and try again.",
           DyadErrorKind.Validation,
         );

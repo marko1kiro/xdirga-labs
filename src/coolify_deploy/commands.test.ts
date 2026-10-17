@@ -2062,7 +2062,12 @@ describe("deploying from GitLab", () => {
     ]);
     route(
       "POST /api/v4/projects/9/deploy_keys",
-      { id: 5, title: "Dyad", key: "ssh-ed25519 AAAAPUBLIC", can_push: false },
+      {
+        id: 5,
+        title: "XDIRGA LABS",
+        key: "ssh-ed25519 AAAAPUBLIC",
+        can_push: false,
+      },
       201,
     );
     route("GET /api/v4/projects/9", PROJECT);
@@ -2116,7 +2121,12 @@ describe("deploying from GitLab", () => {
       400,
     );
     route("GET /api/v4/projects/9/deploy_keys", [
-      { id: 1, title: "Dyad", key: "ssh-ed25519 AAAAPUBLIC", can_push: false },
+      {
+        id: 1,
+        title: "XDIRGA LABS",
+        key: "ssh-ed25519 AAAAPUBLIC",
+        can_push: false,
+      },
     ]);
 
     await run(app.id);
@@ -2134,7 +2144,12 @@ describe("deploying from GitLab", () => {
     gitlabRoutes();
     route(
       "POST /api/v4/projects/9/deploy_keys",
-      { id: 5, title: "Dyad", key: "ssh-ed25519 AAAAPUBLIC", can_push: true },
+      {
+        id: 5,
+        title: "XDIRGA LABS",
+        key: "ssh-ed25519 AAAAPUBLIC",
+        can_push: true,
+      },
       201,
     );
 

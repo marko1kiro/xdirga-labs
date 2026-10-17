@@ -922,7 +922,7 @@ describe("run", () => {
     ).toBe("idle");
   });
 
-  it("refuses to install over an account Dyad is holding", async () => {
+  it("refuses to install over an account XDIRGA LABS is holding", async () => {
     // The screen that offers this stands aside while a failure is being
     // reported, so its message and log stay reachable — and the form comes
     // with it. Retrying that same server is refused by preflight once Coolify
@@ -1135,7 +1135,7 @@ describe("revealCredentials", () => {
     instanceUrl: "http://203.0.113.5:8000",
   };
 
-  it("hands back what Dyad knows about getting in", async () => {
+  it("hands back what XDIRGA LABS knows about getting in", async () => {
     h.settings = {
       coolify: {
         instanceUrl: "http://203.0.113.5:8000",
@@ -1216,7 +1216,7 @@ describe("revealCredentials", () => {
     expect(result).toEqual({ instance: null, server: null });
   });
 
-  it("answers a null server for an instance Dyad did not set up", async () => {
+  it("answers a null server for an instance XDIRGA LABS did not set up", async () => {
     // Connected by pasting a token, so there is no account Dyad created.
     h.settings = {
       coolify: {

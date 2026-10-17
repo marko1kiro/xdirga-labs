@@ -1510,7 +1510,7 @@ describe("tests handlers", () => {
       }
 
       expect(result.infraError?.message).toMatch(
-        /changed while Dyad was preparing/i,
+        /changed while XDIRGA LABS was preparing/i,
       );
       expect(prepareIsolatedTestDatabaseMock).not.toHaveBeenCalled();
       expect(startE2eTestRuntimeMock).not.toHaveBeenCalled();
@@ -1549,7 +1549,7 @@ describe("tests handlers", () => {
       });
 
       expect(result.infraError?.message).toMatch(
-        /changed while Dyad was preparing/i,
+        /changed while XDIRGA LABS was preparing/i,
       );
       // The capture succeeded, so its workspace is this stage's to clean up —
       // the `setupError` result deliberately carries none for the caller.
@@ -1600,7 +1600,7 @@ describe("tests handlers", () => {
       });
 
       expect(result.infraError?.message).toMatch(
-        /changed while Dyad was preparing/i,
+        /changed while XDIRGA LABS was preparing/i,
       );
       expect(dispose).toHaveBeenCalledOnce();
       expect(prepareIsolatedTestDatabaseMock).not.toHaveBeenCalled();
@@ -1649,7 +1649,7 @@ describe("tests handlers", () => {
       }
 
       expect(result.infraError?.message).toMatch(
-        /changed while Dyad was preparing/i,
+        /changed while XDIRGA LABS was preparing/i,
       );
       expect(startE2eTestRuntimeMock).not.toHaveBeenCalled();
     });
@@ -2364,7 +2364,7 @@ describe("tests handlers", () => {
           expect(result.infraError?.message).toMatch(
             /couldn't confirm.*test processes stopped/i,
           );
-          expect(result.infraError?.message).toMatch(/restart Dyad/i);
+          expect(result.infraError?.message).toMatch(/restart XDIRGA LABS/i);
           expect(teardown).not.toHaveBeenCalled();
           expect(queuedCallback).not.toHaveBeenCalled();
           expect(createE2eTestWorkspaceMock).not.toHaveBeenCalled();

@@ -228,7 +228,7 @@ describe("naming the stored token", () => {
     expect(JSON.stringify(status)).not.toContain("super-secret");
   });
 
-  it("names a server Dyad set up, so the panel can hold the address to it", async () => {
+  it("names a server XDIRGA LABS set up, so the panel can hold the address to it", async () => {
     settings.coolify = {
       ...(settings.coolify as Record<string, unknown>),
       admin: {
@@ -244,7 +244,7 @@ describe("naming the stored token", () => {
     expect(JSON.stringify(status)).not.toContain("Abc123@xyz");
   });
 
-  it("has no server address when Dyad set nothing up", async () => {
+  it("has no server address when XDIRGA LABS set nothing up", async () => {
     const status: any = await call("coolify:get-status", { appId: 1 });
 
     expect(status.serverUrl).toBeNull();
@@ -356,7 +356,7 @@ describe("clearing the token", () => {
   });
 });
 
-describe("the admin account Dyad created", () => {
+describe("the admin account XDIRGA LABS created", () => {
   beforeEach(() => {
     settings.coolify = {
       ...(settings.coolify as Record<string, unknown>),

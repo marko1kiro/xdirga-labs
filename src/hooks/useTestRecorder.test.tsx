@@ -660,7 +660,7 @@ describe("useTestRecorder", () => {
     expect(result.current.steps).toEqual([]);
   });
 
-  it("records a navigation made from Dyad's own address bar", async () => {
+  it("records a navigation made from XDIRGA LABS own address bar", async () => {
     const { result } = await recordingSession({
       iframe: makeIframe(),
       appUrl: true,
@@ -1475,7 +1475,8 @@ describe("useTestRecorder", () => {
       onEnded({
         appId: 1,
         reason: "error",
-        message: "Dyad couldn't restore your app's real database settings",
+        message:
+          "XDIRGA LABS couldn't restore your app's real database settings",
       });
       return { ok: true };
     });

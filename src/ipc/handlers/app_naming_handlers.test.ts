@@ -364,7 +364,7 @@ describe("app naming handlers", () => {
       const sourceId = seedAppWithFolder("Source", "source");
       const copyError = Object.assign(
         new Error(
-          "EACCES: permission denied, copyfile '/Users/alice/Dyad/source/private.txt' -> '/Users/alice/Dyad/copy/private.txt'",
+          "EACCES: permission denied, copyfile '/Users/alice/XDIRGA LABS/source/private.txt' -> '/Users/alice/XDIRGA LABS/copy/private.txt'",
         ),
         { code: "EACCES" },
       );

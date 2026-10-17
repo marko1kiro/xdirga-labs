@@ -615,7 +615,7 @@ async function revertCodebaseToVersion({
   }
   if (repositoryHealth.operationInProgress) {
     throw new DyadError(
-      `Cannot revert: a Git ${repositoryHealth.operationInProgress} is in progress. Finish or cancel it outside Dyad, then try again.`,
+      `Cannot revert: a Git ${repositoryHealth.operationInProgress} is in progress. Finish or cancel it outside XDIRGA LABS, then try again.`,
       DyadErrorKind.Conflict,
     );
   }
@@ -667,7 +667,7 @@ async function revertCodebaseToVersion({
       `Preserving dirty tree in a checkpoint commit before restoring app ${appId}. ` +
         `User-visible uncommitted file(s): ${preservedFiles.length}` +
         (preservedUserVisibleFiles ? ` (${preservedUserVisibleFiles})` : "") +
-        ". Dyad-managed runtime files may also be included in the checkpoint.",
+        ". XDIRGA LABS-managed runtime files may also be included in the checkpoint.",
     );
     checkpointGitStep("preserve-dirty-tree");
     await gitAddAll({ path: appPath });

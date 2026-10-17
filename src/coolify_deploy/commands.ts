@@ -279,7 +279,7 @@ async function ensureGithubDeployKey({
         // whole explanation the user gets for a failed deploy.
         throw new DyadError(
           `GitHub returned something other than a key list for ${owner}/${repo}, ` +
-            `so Dyad could not tell whether the deploy key it holds is already ` +
+            `so XDIRGA LABS could not tell whether the deploy key it holds is already ` +
             `registered there. Try again in a moment.`,
           DyadErrorKind.External,
         );
@@ -302,7 +302,7 @@ async function ensureGithubDeployKey({
         `repository, so GitHub will not accept it here. Remove it from the other ` +
         `repository's deploy keys, or delete ${deployKeyFilePath(keyName)} to ` +
         `generate a new ` +
-        `one — Dyad registers a regenerated key with Coolify under a new name.`,
+        `one — XDIRGA LABS registers a regenerated key with Coolify under a new name.`,
       DyadErrorKind.Validation,
     );
   }
@@ -359,10 +359,10 @@ async function ensureGitLabDeployKey({
   // Coolify push access to the repository it only needs to read.
   const refuseWriteAccess = () =>
     new DyadError(
-      `Dyad's deploy key is already registered on ${label} with write access, ` +
+      `XDIRGA LABS deploy key is already registered on ${label} with write access, ` +
         `but Coolify only needs to read the repository. Give the key read-only ` +
         `access in the project's Deploy keys settings, or remove it there and ` +
-        `deploy again so Dyad can register it read-only.`,
+        `deploy again so XDIRGA LABS can register it read-only.`,
       DyadErrorKind.Validation,
     );
 
@@ -390,7 +390,7 @@ async function ensureGitLabDeployKey({
         `GitLab would not add the deploy key to ${label}: ${
           error instanceof Error ? error.message : String(error)
         }. Remove the key from wherever it is registered, or delete ` +
-          `${deployKeyFilePath(keyName)} to generate a new one — Dyad ` +
+          `${deployKeyFilePath(keyName)} to generate a new one — XDIRGA LABS ` +
           `registers a regenerated key with Coolify under a new name.`,
         DyadErrorKind.Validation,
       );
@@ -839,7 +839,7 @@ export async function runDeployPipeline({
     // The half already in hand, rather than a second read off disk with a
     // fallback that would fingerprint an empty string.
     name: coolifyKeyName(keyName, publicKey),
-    description: "Key Dyad uses to let Coolify clone this repository",
+    description: "Key XDIRGA LABS uses to let Coolify clone this repository",
     privateKey: readPrivateKey(keyName),
   });
   throwIfAborted(signal);

@@ -71,7 +71,7 @@ describe("waiting for Cloudflare to see the repository", () => {
     expect(result.current.data).toEqual({ hasAccess: false });
   });
 
-  it("keeps asking while Dyad is hidden behind the browser", async () => {
+  it("keeps asking while XDIRGA LABS is hidden behind the browser", async () => {
     // React Query skips interval refetches for a hidden document by default.
     focusManager.setFocused(false);
     renderAccessCheck(new QueryClient());

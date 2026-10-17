@@ -203,7 +203,7 @@ describe("mintApiToken", () => {
     expect(session.scripts[0]).toContain("session(['currentTeam' => $team])");
   });
 
-  it("asks for the scopes Dyad tells users to tick", async () => {
+  it("asks for the scopes XDIRGA LABS tells users to tick", async () => {
     // Narrower tokens hide a server's private key id, which the deploy path
     // reads to tell a stale key from one it simply cannot see.
     const session = fakeSession([REAL_TOKEN]);
