@@ -34,6 +34,7 @@ export const SETTING_IDS = {
   gitlab: "setting-gitlab",
   vercel: "setting-vercel",
   cloudflare: "setting-cloudflare",
+  firecrawl: "setting-firecrawl",
   supabase: "setting-supabase",
   neon: "setting-neon",
   enableCloudSandbox: "setting-enable-cloud-sandbox",
@@ -357,6 +358,15 @@ export const SETTINGS_SEARCH_INDEX: SearchableSettingItem[] = [
     label: "Cloudflare Integration",
     description: "Manage the Cloudflare API token used for Worker deployments",
     keywords: ["cloudflare", "workers", "deploy", "integration", "token"],
+    sectionId: SECTION_IDS.integrations,
+    sectionLabel: "Integrations",
+  },
+  {
+    id: SETTING_IDS.firecrawl,
+    label: "Firecrawl Integration",
+    description:
+      "API key for web crawls with a full-page screenshot when cloning sites",
+    keywords: ["firecrawl", "screenshot", "clone", "crawl", "web", "scrape"],
     sectionId: SECTION_IDS.integrations,
     sectionLabel: "Integrations",
   },

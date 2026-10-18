@@ -4,6 +4,7 @@ import { ToolDefinition, escapeXmlContent, AgentContext } from "./types";
 import { engineFetch } from "./engine_fetch";
 import { resolveLocalNineRouterProvider } from "./ninerouter_provider";
 import { callNineRouterFetch } from "./ninerouter_web";
+import { callFirecrawlScrape, resolveFirecrawlApiKey } from "./firecrawl";
 import {
   getImageDimensionsFromDataUrl,
   isImageTooLarge,
@@ -86,6 +87,64 @@ Replicate the website from the provided markdown snapshot.
 Always include the placeholder.svg file in your output file tree.
 `;
 
+/**
+ * Build the crawl message content shared by the Firecrawl and Dyad paths:
+ * screenshot-aware clone instructions + the screenshot image (unless it is
+ * too large for the model) + the markdown snapshot.
+ */
+function buildCrawlMessageContent(
+  markdown: string,
+  screenshotDataUrl?: string,
+): Parameters<AgentContext["appendUserMessage"]>[0] {
+  if (!screenshotDataUrl) {
+    return [
+      { type: "text", text: CLONE_INSTRUCTIONS_WITHOUT_SCREENSHOT },
+      {
+        type: "text",
+        text: formatSnippet("Markdown snapshot:", markdown, "markdown"),
+      },
+    ];
+  }
+
+  // Check image dimensions before sending to LLM
+  const imageDimensions = getImageDimensionsFromDataUrl(screenshotDataUrl);
+  const imageExceedsSizeLimit =
+    imageDimensions && isImageTooLarge(imageDimensions);
+
+  if (imageExceedsSizeLimit) {
+    logger.warn(
+      `Screenshot dimensions (${imageDimensions.width}x${imageDimensions.height}) exceed max allowed size (${MAX_IMAGE_DIMENSION}px). Omitting image.`,
+    );
+  }
+
+  const includeScreenshot = !imageExceedsSizeLimit;
+  const instructions = includeScreenshot
+    ? CLONE_INSTRUCTIONS_WITH_SCREENSHOT
+    : CLONE_INSTRUCTIONS_WITHOUT_SCREENSHOT;
+
+  const messageContent: Parameters<AgentContext["appendUserMessage"]>[0] = [
+    { type: "text", text: instructions },
+  ];
+
+  if (includeScreenshot) {
+    // Add the screenshot image
+    messageContent.push({ type: "image-url", url: screenshotDataUrl });
+  } else {
+    // Add explanation instead of the image
+    messageContent.push({
+      type: "text",
+      text: `[Screenshot omitted: Image dimensions (${imageDimensions!.width}x${imageDimensions!.height}px) exceed the maximum allowed size of ${MAX_IMAGE_DIMENSION}px. Please rely on the markdown snapshot below to understand the page structure and content.]`,
+    });
+  }
+
+  messageContent.push({
+    type: "text",
+    text: formatSnippet("Markdown snapshot:", markdown, "markdown"),
+  });
+
+  return messageContent;
+}
+
 async function callWebCrawl(
   url: string,
   ctx: Pick<AgentContext, "dyadRequestId" | "abortSignal">,
@@ -130,6 +189,23 @@ export const webCrawlTool: ToolDefinition<z.infer<typeof webCrawlSchema>> = {
 
   execute: async (args, ctx) => {
     logger.log(`Executing web crawl: ${args.url}`);
+
+    // Fork: a configured Firecrawl API key wins — it is the only path that
+    // returns a full-page screenshot (9Router drops Firecrawl's screenshot
+    // field, so the gateway cannot return one). A configured Firecrawl key
+    // never falls back to 9Router/Dyad on failure.
+    const firecrawlApiKey = await resolveFirecrawlApiKey();
+    if (firecrawlApiKey) {
+      const firecrawlResult = await callFirecrawlScrape(args.url, ctx);
+      logger.log(`Web crawl completed for URL: ${args.url} (Firecrawl)`);
+      ctx.appendUserMessage(
+        buildCrawlMessageContent(
+          firecrawlResult.markdown,
+          firecrawlResult.screenshotDataUrl,
+        ),
+      );
+      return "Web crawl completed.";
+    }
 
     // Fork: 9Router has no screenshot endpoint, so a 9Router crawl returns
     // markdown only and uses the without-screenshot clone instructions.
@@ -179,43 +255,9 @@ export const webCrawlTool: ToolDefinition<z.infer<typeof webCrawlSchema>> = {
     }
     logger.log(`Web crawl completed for URL: ${args.url}`);
 
-    // Check image dimensions before sending to LLM
-    const imageDimensions = getImageDimensionsFromDataUrl(result.screenshot);
-    const imageExceedsSizeLimit =
-      imageDimensions && isImageTooLarge(imageDimensions);
-
-    if (imageExceedsSizeLimit) {
-      logger.warn(
-        `Screenshot dimensions (${imageDimensions.width}x${imageDimensions.height}) exceed max allowed size (${MAX_IMAGE_DIMENSION}px). Omitting image.`,
-      );
-    }
-
-    const includeScreenshot = !imageExceedsSizeLimit;
-    const instructions = includeScreenshot
-      ? CLONE_INSTRUCTIONS_WITH_SCREENSHOT
-      : CLONE_INSTRUCTIONS_WITHOUT_SCREENSHOT;
-
-    const messageContent: Parameters<typeof ctx.appendUserMessage>[0] = [
-      { type: "text", text: instructions },
-    ];
-
-    if (includeScreenshot) {
-      // Add the screenshot image
-      messageContent.push({ type: "image-url", url: result.screenshot });
-    } else {
-      // Add explanation instead of the image
-      messageContent.push({
-        type: "text",
-        text: `[Screenshot omitted: Image dimensions (${imageDimensions!.width}x${imageDimensions!.height}px) exceed the maximum allowed size of ${MAX_IMAGE_DIMENSION}px. Please rely on the markdown snapshot below to understand the page structure and content.]`,
-      });
-    }
-
-    messageContent.push({
-      type: "text",
-      text: formatSnippet("Markdown snapshot:", result.markdown, "markdown"),
-    });
-
-    ctx.appendUserMessage(messageContent);
+    ctx.appendUserMessage(
+      buildCrawlMessageContent(result.markdown, result.screenshot),
+    );
 
     return "Web crawl completed.";
   },

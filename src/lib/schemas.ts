@@ -538,6 +538,10 @@ const BaseUserSettingsFields = {
   // One API token does two jobs: Dyad uses it to set up Workers and deploy
   // rules, and Cloudflare's build service deploys with it after each push.
   cloudflareAccessToken: SecretSchema.optional(),
+  // Fork: Firecrawl API key for direct web crawls with a full-page
+  // screenshot (used by the web_crawl tool for cloning). 9Router cannot
+  // return screenshots, so this bypasses the gateway for crawls only.
+  firecrawlApiKey: SecretSchema.optional(),
   coolify: CoolifySchema.optional(),
   supabase: SupabaseSchema.optional(),
   neon: NeonSchema.optional(),

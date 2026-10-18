@@ -15,6 +15,7 @@ import { GitLabIntegration } from "@/components/GitLabIntegration";
 import { GitLabPublishingExperimentSwitch } from "@/components/GitLabPublishingExperimentSwitch";
 import { VercelIntegration } from "@/components/VercelIntegration";
 import { CloudflareIntegration } from "@/components/CloudflareIntegration";
+import { FirecrawlIntegration } from "@/components/FirecrawlIntegration";
 import { SupabaseIntegration } from "@/components/SupabaseIntegration";
 import { CustomAppsFolderSelector } from "@/components/CustomAppsFolderSelector";
 import { Switch } from "@/components/ui/switch";
@@ -186,6 +187,9 @@ export default function SettingsPage() {
             </div>
             <div id={SETTING_IDS.cloudflare}>
               <CloudflareIntegration />
+            </div>
+            <div id={SETTING_IDS.firecrawl}>
+              <FirecrawlIntegration />
             </div>
             <div id={SETTING_IDS.supabase}>
               <SupabaseIntegration />

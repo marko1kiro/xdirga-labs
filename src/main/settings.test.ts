@@ -260,6 +260,29 @@ describe("readSettings", () => {
       });
     });
 
+    it("should decrypt encrypted Firecrawl API key", () => {
+      const mockFileContent = {
+        firecrawlApiKey: {
+          value: "encrypted-firecrawl-key",
+          encryptionType: "electron-safe-storage",
+        },
+      };
+
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(JSON.stringify(mockFileContent));
+      mockSafeStorage.decryptString.mockReturnValue("decrypted-firecrawl-key");
+
+      const result = readSettings();
+
+      expect(mockSafeStorage.decryptString).toHaveBeenCalledWith(
+        Buffer.from("encrypted-firecrawl-key", "base64"),
+      );
+      expect(result.firecrawlApiKey).toEqual({
+        value: "decrypted-firecrawl-key",
+        encryptionType: "electron-safe-storage",
+      });
+    });
+
     it("should decrypt encrypted Supabase tokens", () => {
       const mockFileContent = {
         supabase: {

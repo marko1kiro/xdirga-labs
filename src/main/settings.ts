@@ -417,6 +417,9 @@ export function writeSettings(settings: Partial<UserSettings>): void {
         newSettings.cloudflareAccessToken.value,
       );
     }
+    if (newSettings.firecrawlApiKey) {
+      newSettings.firecrawlApiKey = encrypt(newSettings.firecrawlApiKey.value);
+    }
     if (newSettings.coolify?.accessToken) {
       newSettings.coolify = {
         ...newSettings.coolify,
@@ -706,6 +709,19 @@ function readExistingSettingsFile(
       combinedSettings.cloudflareAccessToken = resolved;
     } else {
       delete combinedSettings.cloudflareAccessToken;
+    }
+  }
+  if (combinedSettings.firecrawlApiKey) {
+    const resolved = resolveStoredSecret(
+      combinedSettings.firecrawlApiKey,
+      "Firecrawl API key",
+      ["firecrawlApiKey"],
+      ctx,
+    );
+    if (resolved) {
+      combinedSettings.firecrawlApiKey = resolved;
+    } else {
+      delete combinedSettings.firecrawlApiKey;
     }
   }
   if (combinedSettings.coolify?.accessToken) {
