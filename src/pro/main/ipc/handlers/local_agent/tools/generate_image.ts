@@ -12,9 +12,10 @@ import {
 import { DYAD_MEDIA_DIR_NAME } from "@/ipc/utils/media_path_utils";
 import { ImageGenerationApiResponseSchema } from "@/ipc/types/image_generation";
 import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
-import { readSettings } from "@/main/settings";
-import { getLanguageModelProviders } from "@/ipc/shared/language_model_helpers";
-import { getEnvVar } from "@/ipc/utils/read_env";
+import {
+  LOCAL_NINEROUTER_BASE_URL,
+  resolveLocalNineRouterProvider,
+} from "./ninerouter_provider";
 
 const logger = log.scope("generate_image");
 
@@ -50,56 +51,21 @@ The tool returns the file path in .dyad/media. Use the copy_file tool to copy it
 `;
 
 /** Fork: image generation runs through the local 9Router gateway, not Dyad. */
-const LOCAL_IMAGE_BASE_URL = "http://localhost:20128/v1";
 const LOCAL_IMAGE_MODEL = "ag/gemini-3.1-flash-image";
 const IMAGE_GENERATION_TIMEOUT_MS = 120_000;
-
-/** Normalize a provider base URL for comparison. */
-function normalizeBaseUrl(url: string): string {
-  const trimmed = url.trim().replace(/\/+$/, "");
-  // localhost and 127.0.0.1 are the same local gateway.
-  return trimmed
-    .replace("http://127.0.0.1", "http://localhost")
-    .replace("https://127.0.0.1", "https://localhost");
-}
-
-/** Find the local 9Router custom provider and its API key. */
-export async function resolveLocalImageProvider(): Promise<{
-  baseUrl: string;
-  apiKey: string;
-}> {
-  const settings = readSettings();
-  const providers = await getLanguageModelProviders();
-  const provider = providers.find(
-    (p) =>
-      p.type === "custom" &&
-      p.apiBaseUrl &&
-      normalizeBaseUrl(p.apiBaseUrl) === normalizeBaseUrl(LOCAL_IMAGE_BASE_URL),
-  );
-  if (!provider) {
-    throw new DyadError(
-      `Image generation needs the local 9Router provider (${LOCAL_IMAGE_BASE_URL}) configured as a custom provider in Settings.`,
-      DyadErrorKind.Precondition,
-    );
-  }
-  const rawKey =
-    settings.providerSettings?.[provider.id]?.apiKey?.value ||
-    (provider.envVarName ? getEnvVar(provider.envVarName) : undefined);
-  const apiKey = rawKey?.trim() || undefined;
-  if (!apiKey) {
-    throw new DyadError(
-      `Image generation needs an API key for the local 9Router provider (${provider.name ?? provider.id}). Add it in Settings.`,
-      DyadErrorKind.Auth,
-    );
-  }
-  return { baseUrl: provider.apiBaseUrl!, apiKey };
-}
 
 export async function callGenerateImage(
   prompt: string,
   ctx: Pick<AgentContext, "dyadRequestId" | "abortSignal">,
 ): Promise<z.infer<typeof ImageGenerationApiResponseSchema>["data"][number]> {
-  const { baseUrl, apiKey } = await resolveLocalImageProvider();
+  const resolved = await resolveLocalNineRouterProvider();
+  if (!resolved) {
+    throw new DyadError(
+      `Image generation needs the local 9Router provider (${LOCAL_NINEROUTER_BASE_URL}) configured as a custom provider in Settings.`,
+      DyadErrorKind.Precondition,
+    );
+  }
+  const { baseUrl, apiKey } = resolved;
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/images/generations`;
   const timeoutSignal = AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS);
   const signal = ctx.abortSignal

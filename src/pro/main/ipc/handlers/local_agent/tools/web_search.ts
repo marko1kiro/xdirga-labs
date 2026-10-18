@@ -8,6 +8,8 @@ import {
 } from "./types";
 import { engineFetch } from "./engine_fetch";
 import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
+import { resolveLocalNineRouterProvider } from "./ninerouter_provider";
+import { callNineRouterSearch } from "./ninerouter_web";
 
 const logger = log.scope("web_search");
 
@@ -97,14 +99,29 @@ function parseSSEEvents(
 }
 
 /**
+ * Web search: local 9Router gateway when configured, else Dyad Engine.
+ * A configured 9Router provider never falls back to Dyad on failure.
+ */
+export async function callWebSearch(
+  query: string,
+  ctx: AgentContext,
+): Promise<string> {
+  ctx.onXmlStream(`<dyad-web-search query="${escapeXmlAttr(query)}">`);
+
+  const nineRouter = await resolveLocalNineRouterProvider();
+  if (nineRouter) {
+    return callNineRouterSearch(query, ctx);
+  }
+  return callWebSearchSSE(query, ctx);
+}
+
+/**
  * Call the web search SSE endpoint and stream results
  */
 async function callWebSearchSSE(
   query: string,
   ctx: AgentContext,
 ): Promise<string> {
-  ctx.onXmlStream(`<dyad-web-search query="${escapeXmlAttr(query)}">`);
-
   const response = await engineFetch(ctx, "/tools/web-search", {
     method: "POST",
     headers: {
@@ -186,7 +203,7 @@ export const webSearchTool: ToolDefinition<z.infer<typeof webSearchSchema>> = {
   execute: async (args, ctx: AgentContext) => {
     logger.log(`Executing web search: ${args.query}`);
 
-    const result = await callWebSearchSSE(args.query, ctx);
+    const result = await callWebSearch(args.query, ctx);
 
     if (!result) {
       throw new DyadError(

@@ -3,6 +3,8 @@ import log from "electron-log";
 import { ToolDefinition, escapeXmlContent, AgentContext } from "./types";
 import { engineFetch } from "./engine_fetch";
 import { DyadError, DyadErrorKind } from "@/errors/dyad_error";
+import { resolveLocalNineRouterProvider } from "./ninerouter_provider";
+import { callNineRouterFetch } from "./ninerouter_web";
 
 const logger = log.scope("web_fetch");
 
@@ -61,10 +63,19 @@ Examples:
 - The user needs to **search the web** for information without a specific URL → use \`web_search\` instead
 `;
 
-async function callWebFetch(
+/**
+ * Web fetch: local 9Router gateway when configured, else Dyad Engine.
+ * A configured 9Router provider never falls back to Dyad on failure.
+ */
+export async function callWebFetch(
   url: string,
   ctx: Pick<AgentContext, "dyadRequestId" | "abortSignal">,
 ): Promise<z.infer<typeof webFetchResponseSchema>> {
+  const nineRouter = await resolveLocalNineRouterProvider();
+  if (nineRouter) {
+    return callNineRouterFetch(url, ctx);
+  }
+
   const response = await engineFetch(ctx, "/tools/web-crawl", {
     method: "POST",
     body: JSON.stringify({ url, markdownOnly: true }),

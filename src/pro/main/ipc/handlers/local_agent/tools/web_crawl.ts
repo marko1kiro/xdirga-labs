@@ -2,6 +2,8 @@ import { z } from "zod";
 import log from "electron-log";
 import { ToolDefinition, escapeXmlContent, AgentContext } from "./types";
 import { engineFetch } from "./engine_fetch";
+import { resolveLocalNineRouterProvider } from "./ninerouter_provider";
+import { callNineRouterFetch } from "./ninerouter_web";
 import {
   getImageDimensionsFromDataUrl,
   isImageTooLarge,
@@ -128,6 +130,30 @@ export const webCrawlTool: ToolDefinition<z.infer<typeof webCrawlSchema>> = {
 
   execute: async (args, ctx) => {
     logger.log(`Executing web crawl: ${args.url}`);
+
+    // Fork: 9Router has no screenshot endpoint, so a 9Router crawl returns
+    // markdown only and uses the without-screenshot clone instructions.
+    // A configured 9Router provider never falls back to Dyad on failure.
+    const nineRouter = await resolveLocalNineRouterProvider();
+    if (nineRouter) {
+      const fetchResult = await callNineRouterFetch(args.url, ctx);
+      const markdown = fetchResult.pages[0]?.markdown;
+      if (!markdown) {
+        throw new DyadError(
+          "No content available from web crawl",
+          DyadErrorKind.External,
+        );
+      }
+      logger.log(`Web crawl completed for URL: ${args.url} (9Router)`);
+      ctx.appendUserMessage([
+        { type: "text", text: CLONE_INSTRUCTIONS_WITHOUT_SCREENSHOT },
+        {
+          type: "text",
+          text: formatSnippet("Markdown snapshot:", markdown, "markdown"),
+        },
+      ]);
+      return "Web crawl completed.";
+    }
 
     const result = await callWebCrawl(args.url, ctx);
 
