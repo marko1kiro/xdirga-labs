@@ -75,9 +75,15 @@ async function postNineRouter(
 }
 
 /**
- * Discover the first 9Router web model of the given kind via
+ * Discover the first 9Router web provider of the given kind via
  * `GET /v1/models/web`. Returns undefined when the gateway has no such
  * provider configured.
+ *
+ * The catalog lists entries as `provider/kind` IDs (e.g. `exa/search`),
+ * but the `/v1/search` and `/v1/web/fetch` endpoints expect a bare
+ * provider name as `model` (e.g. `exa`) — passing the catalog ID is
+ * rejected with `400 Unknown provider: exa/search`. So the suffix is
+ * stripped before the value is used as a model.
  */
 async function discoverWebModel(
   baseUrl: string,
@@ -104,7 +110,13 @@ async function discoverWebModel(
   const entry = data.data.find(
     (model) => model.kind === kind || model.id.endsWith(suffix),
   );
-  return entry?.id;
+  if (!entry) {
+    return undefined;
+  }
+  // Catalog ID is `provider/kind`; the endpoints want the bare provider.
+  return entry.id.endsWith(suffix)
+    ? entry.id.slice(0, -suffix.length)
+    : entry.id;
 }
 
 function throwUpstreamError(

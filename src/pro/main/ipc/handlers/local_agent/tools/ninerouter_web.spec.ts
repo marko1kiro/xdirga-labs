@@ -156,7 +156,44 @@ describe("callNineRouterSearch", () => {
     const [retryUrl, retryOptions] = mocks.fetch.mock.calls[2];
     expect(retryUrl).toBe("http://localhost:20128/v1/search");
     expect(JSON.parse(retryOptions.body)).toMatchObject({
-      model: "tavily/search",
+      model: "tavily",
+    });
+  });
+
+  it("strips the /search suffix from a discovered catalog ID (gateway wants a bare provider name)", async () => {
+    // Regression: the gateway rejects `exa/search` with
+    // `400 Unknown provider: exa/search` — the search endpoint expects the
+    // bare provider name `exa`.
+    mocks.fetch
+      .mockResolvedValueOnce(
+        jsonResponse(400, "Invalid model format", "Bad Request"),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          object: "list",
+          data: [{ id: "exa/search", kind: "webSearch" }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          provider: "exa",
+          query: "NextJS 14",
+          results: [
+            {
+              title: "Next.js 14 Docs",
+              url: "https://nextjs.org/docs",
+              snippet: "The React framework.",
+            },
+          ],
+        }),
+      );
+
+    const result = await callNineRouterSearch("NextJS 14", mockCtx());
+
+    expect(result).toContain("Next.js 14 Docs");
+    const [, retryOptions] = mocks.fetch.mock.calls[2];
+    expect(JSON.parse(retryOptions.body)).toMatchObject({
+      model: "exa",
     });
   });
 
@@ -281,7 +318,7 @@ describe("callNineRouterFetch", () => {
     const [retryUrl, retryOptions] = mocks.fetch.mock.calls[2];
     expect(retryUrl).toBe("http://localhost:20128/v1/web/fetch");
     expect(JSON.parse(retryOptions.body)).toMatchObject({
-      model: "firecrawl/fetch",
+      model: "firecrawl",
     });
   });
 
