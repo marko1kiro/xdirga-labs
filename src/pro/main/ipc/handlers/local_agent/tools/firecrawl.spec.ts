@@ -15,7 +15,7 @@ vi.mock("electron-log", () => ({
 
 const mocks = vi.hoisted(() => ({
   readSettings: vi.fn(),
-  getEnvVar: vi.fn(() => undefined),
+  getEnvVar: vi.fn((): string | undefined => undefined),
   fetch: vi.fn(),
 }));
 
